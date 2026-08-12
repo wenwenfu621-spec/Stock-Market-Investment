@@ -1,11 +1,11 @@
 # ====================================================
 # 台股價值與潛力股智慧分析系統 (Taiwan Stock Screener)
-# 版本別 (Version): v1.1.7
+# 版本別 (Version): v1.1.8
 # 更新日期 (Date): 2026-08-12
 # 修改重點: 
-#   1. 清除檔尾誤貼之非 Python 說明文字（解決 Line 259 SyntaxError）
-#   2. 確定採用 client.models.generate_content 標準語法
-#   3. 支援 Gemini 2.0-flash / 1.5-flash 自動備援
+#   1. 動態偵測 Gemini API 支援的模型清單 (client.models.list())
+#   2. 加入 gemini-2.5-flash, gemini-2.0-flash 多重模型備援
+#   3. 徹底解決 gemini-1.5-flash 404 NOT_FOUND 錯誤
 # ====================================================
 
 import json
@@ -18,7 +18,7 @@ from google import genai
 # ----------------------------------------------------
 # 1. 網頁基本設定 (Page Config)
 # ----------------------------------------------------
-APP_VERSION = "v1.1.7"
+APP_VERSION = "v1.1.8"
 APP_DATE = "2026-08-12"
 
 st.set_page_config(
@@ -223,14 +223,26 @@ with tab3:
                 5. **總結與長期持有建議**
                 """
                 
-                # 自動輪詢官方模型，避免 404 錯誤
-                candidate_models = ["gemini-2.0-flash", "gemini-1.5-flash"]
+                # 動態獲取該 API Key 支援的模型清單，避免硬編碼舊模型導致 404
+                candidate_models = []
+                try:
+                    models_list = client.models.list()
+                    for m in models_list:
+                        m_name = getattr(m, 'name', str(m)).replace("models/", "")
+                        if "gemini" in m_name.lower() and "embedding" not in m_name.lower() and "image" not in m_name.lower():
+                            candidate_models.append(m_name)
+                except Exception:
+                    pass
+
+                # 若動態獲取失敗，預設優先嘗試以下當前最新模型
+                if not candidate_models:
+                    candidate_models = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.5-pro", "gemini-flash-latest"]
+
                 ai_success = False
                 last_ex = None
 
                 for model_name in candidate_models:
                     try:
-                        # 修正 SDK 呼叫方法為 client.models.generate_content
                         response = client.models.generate_content(
                             model=model_name,
                             contents=prompt
@@ -253,3 +265,4 @@ with tab3:
 # ----------------------------------------------------
 st.markdown("---")
 st.caption(f"系統版本：{APP_VERSION} ｜ 最後更新日期：{APP_DATE} ｜ 資料來源：臺灣證券交易所、櫃買中心與公開資訊觀測站")
+```
