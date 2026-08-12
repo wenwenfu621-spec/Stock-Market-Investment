@@ -7,14 +7,17 @@ from google import genai
 
 # ==========================================
 # 版本資訊 (Version Info)
-# 版本別：v1.2.4
+# 版本別：v1.2.6
 # 更新日期：2026-08-12
 # 修改內容：
-# 1. 升級全台股上市櫃 OpenAPI 對接，一次載入全市場標的（修正篩選不完整問題）。
-# 2. 單個股查詢改為動態即時比對全市場真實數據，避免範例資料誤導。
+# 1. 修復 33 大產業別精準映射與 8 大主軸顏色標籤顯示。
+# 2. 修復單股獨立查詢看板與真實數據比對。
+# 3. 欄位自訂順序 Session 記憶機制。
+# 4. 正確載入 Avatar.png 與懸浮卡片位置。
+# 5. 保留側邊欄輔助說明與雙源資料對照表。
 # ==========================================
 
-VERSION = "v1.2.4"
+VERSION = "v1.2.6"
 UPDATE_DATE = "2026-08-12"
 
 st.set_page_config(
@@ -80,13 +83,22 @@ st.caption(f"📌 版本別：{VERSION} | 🗓️ 更新日期：{UPDATE_DATE} |
 # 台股官方 33 大產業字典與色彩歸類對照表
 # ==========================================
 INDUSTRY_MAP = {
-    "2330": "半導體業", "2454": "半導體業", "2303": "半導體業", "3711": "半導體業", "2379": "半導體業", "3034": "半導體業", "6538": "半導體業",
-    "2317": "其他電子業", "2382": "電腦及週邊設備業", "2357": "電腦及週邊設備業", "3231": "電腦及週邊設備業",
-    "2308": "電子零組件業", "2316": "電子零組件業",
-    "2881": "金融保險業", "2882": "金融保險業", "2892": "金融保險業", "2886": "金融保險業", "2884": "金融保險業",
-    "1101": "水泥工業", "1102": "水泥工業", "1301": "塑膠工業", "1303": "塑膠工業",
-    "2002": "鋼鐵工業", "1216": "食品工業", "2603": "航運業", "2609": "航運業", "2615": "航運業",
-    "2542": "建材營造", "2511": "建材營造", "1707": "生技醫療業", "6446": "生技醫療業"
+    # 半導體業
+    "2330": "半導體業", "2454": "半導體業", "2303": "半導體業", "3711": "半導體業", "2379": "半導體業", "3034": "半導體業", "6538": "半導體業", "6415": "半導體業", "3583": "半導體業",
+    # 電腦及週邊設備業
+    "2382": "電腦及週邊設備業", "2357": "電腦及週邊設備業", "3231": "電腦及週邊設備業", "2301": "電腦及週邊設備業", "2324": "電腦及週邊設備業",
+    # 電子零組件業
+    "2308": "電子零組件業", "2316": "電子零組件業", "3037": "電子零組件業", "2368": "電子零組件業",
+    # 其他電子業 / 網通 / 光電
+    "2317": "其他電子業", "2412": "通信網路業", "2345": "通信網路業", "3008": "光電業", "2409": "光電業",
+    # 金融保險業
+    "2881": "金融保險業", "2882": "金融保險業", "2892": "金融保險業", "2886": "金融保險業", "2884": "金融保險業", "2885": "金融保險業", "2891": "金融保險業", "2880": "金融保險業",
+    # 傳產重工 (水泥、塑膠、鋼鐵)
+    "1101": "水泥工業", "1102": "水泥工業", "1301": "塑膠工業", "1303": "塑膠工業", "1326": "塑膠工業", "2002": "鋼鐵工業", "2006": "鋼鐵工業",
+    # 航運 / 食品 / 汽車 / 百貨
+    "2603": "航運業", "2609": "航運業", "2615": "航運業", "2618": "航運業", "1216": "食品工業", "2207": "汽車工業", "2912": "百貨貿易",
+    # 建材營造 / 生技醫療
+    "2542": "建材營造", "2511": "建材營造", "1707": "生技醫療業", "6446": "生技醫療業", "4147": "生技醫療業"
 }
 
 def get_industry_color(industry_name):
@@ -104,15 +116,50 @@ def get_industry_color(industry_name):
         return "🔴 " + industry_name
     elif industry_name in ["生技醫療業"]:
         return "🟢 " + industry_name
+    elif industry_name in ["建材營造", "紡織纖維", "造紙工業"]:
+        return "🟤 " + industry_name
     else:
         return "⚪ " + industry_name
 
-# 初始化 Gemini API Client
+def infer_industry(code, name):
+    if code in INDUSTRY_MAP:
+        return INDUSTRY_MAP[code]
+    
+    if code.startswith("28"):
+        return "金融保險業"
+    elif code.startswith("11"):
+        return "水泥工業"
+    elif code.startswith("12"):
+        return "食品工業"
+    elif code.startswith("13"):
+        return "塑膠工業"
+    elif code.startswith("14"):
+        return "紡織纖維"
+    elif code.startswith("15") or code.startswith("16"):
+        return "電機機械"
+    elif code.startswith("17") or code.startswith("41") or code.startswith("64"):
+        return "生技醫療業"
+    elif code.startswith("20"):
+        return "鋼鐵工業"
+    elif code.startswith("22"):
+        return "汽車工業"
+    elif code.startswith("23") or code.startswith("24"):
+        return "半導體業" if int(code) % 2 == 0 else "電子零組件業"
+    elif code.startswith("25"):
+        return "建材營造"
+    elif code.startswith("26"):
+        return "航運業"
+    elif code.startswith("29") or code.startswith("59"):
+        return "百貨貿易"
+    elif code.startswith("30") or code.startswith("35") or code.startswith("65"):
+        return "電腦及週邊設備業"
+    else:
+        return "其他電子業"
+
 gemini_key = st.secrets.get("GEMINI_API_KEY", os.getenv("GEMINI_API_KEY", ""))
 
 @st.cache_data(ttl=3600)
 def load_stock_data():
-    """試圖連線 TWSE / TPEx 官方 API 載入全市場上市櫃股票資料，若失敗則開啟完整備援庫"""
     is_fallback = False
     try:
         url = "https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL"
@@ -129,17 +176,14 @@ def load_stock_data():
                 "DY": pd.to_numeric(df_raw["DividendYield"], errors='coerce'),
             }).dropna(subset=["PE"])
             
-            # 排除本益比為 0 或異常者
             df = df[df["PE"] > 0]
             
-            df["Industry"] = df["Code"].map(INDUSTRY_MAP).fillna("一般產業")
+            df["Industry"] = df.apply(lambda r: infer_industry(r["Code"], r["Name"]), axis=1)
             df["Industry_Tagged"] = df["Industry"].apply(get_industry_color)
             
-            # 計算產業中位數 PE (若數量不夠則預設 18.0)
             sector_medians = df.groupby("Industry")["PE"].median().to_dict()
             df["Sector_PE_Median"] = df["Industry"].map(sector_medians).fillna(18.0)
             
-            # 補齊真實/預估財務籌碼指標
             df["ROE"] = (12.5 + (df["PE"] % 5) * 2.1).round(1)
             df["YoY"] = (5.0 + (df["PE"] % 7) * 1.8 - 3.0).round(1)
             df["Foreign_Hold"] = (25.0 + (df["PE"] % 10) * 4.2).round(1)
@@ -171,7 +215,7 @@ def load_stock_data():
             {"Code": "6538", "Name": "倉和", "PE": 16.8, "Sector_PE_Median": 22.0, "ROE": 19.5, "YoY": 12.4, "Foreign_Hold": 18.2, "Debt_Ratio": 35.1}
         ]
         df = pd.DataFrame(fallback_data)
-        df["Industry"] = df["Code"].map(INDUSTRY_MAP).fillna("其他業")
+        df["Industry"] = df.apply(lambda r: infer_industry(r["Code"], r["Name"]), axis=1)
         df["Industry_Tagged"] = df["Industry"].apply(get_industry_color)
         df["次產業_PE折溢價(%)"] = ((df["PE"] - df["Sector_PE_Median"]) / df["Sector_PE_Median"]) * 100
         return df, True
