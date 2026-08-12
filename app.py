@@ -1,11 +1,11 @@
 # ====================================================
 # 台股價值與潛力股智慧分析系統 (Taiwan Stock Screener)
-# 版本別 (Version): v1.1.4
+# 版本別 (Version): v1.1.5
 # 更新日期 (Date): 2026-08-12
 # 修改重點: 
-#   1. 新增 Gemini AI 多模型自動備援機制 (Auto-fallback)，徹底解決 404 NOT_FOUND 錯誤
-#   2. 完善數據與欄位匹配，確保不發生 KeyError 錯誤
-#   3. 優化側邊欄提示標籤與整體系統防爆保護
+#   1. 優化 Gemini API 報錯顯示，明確指出金鑰設定狀態與錯誤原因
+#   2. 校正模型名稱為官方標準款 (gemini-2.0-flash / gemini-1.5-flash)
+#   3. 完善數據防暴與安全備援機制
 # ====================================================
 
 import json
@@ -18,7 +18,7 @@ from google import genai
 # ----------------------------------------------------
 # 1. 網頁基本設定 (Page Config)
 # ----------------------------------------------------
-APP_VERSION = "v1.1.4"
+APP_VERSION = "v1.1.5"
 APP_DATE = "2026-08-12"
 
 st.set_page_config(
@@ -36,19 +36,25 @@ st.caption(f"📌 版本別：{APP_VERSION} ｜ 🗓️ 更新日期：{APP_DATE
 @st.cache_resource
 def get_gemini_client():
     api_key = None
-    if "GEMINI_API_KEY" in st.secrets:
-        api_key = st.secrets["GEMINI_API_KEY"]
-    else:
+    # 優先從 Streamlit Secrets 讀取
+    try:
+        if "GEMINI_API_KEY" in st.secrets:
+            api_key = st.secrets["GEMINI_API_KEY"]
+    except Exception:
+        pass
+
+    # 次之從系統環境變數讀取
+    if not api_key:
         api_key = os.environ.get("GEMINI_API_KEY")
     
     if api_key:
         try:
-            return genai.Client(api_key=api_key)
-        except Exception:
-            return None
-    return None
+            return genai.Client(api_key=api_key), api_key
+        except Exception as e:
+            return None, f"Client 初始化失敗: {str(e)}"
+    return None, "未檢測到 GEMINI_API_KEY"
 
-client = get_gemini_client()
+client, client_err_msg = get_gemini_client()
 
 # ----------------------------------------------------
 # 3. 資料抓取模組 (含防爆網與備援機制)
@@ -190,7 +196,7 @@ with tab3:
     st.subheader("🤖 Gemini AI 智慧個股深度評估")
     
     if client is None:
-        st.error("⚠️ 未檢測到有效的 Gemini API 金鑰。請於 Streamlit Cloud 設定 `GEMINI_API_KEY` 以啟用 AI 分析功能。")
+        st.error(f"⚠️ 尚未成功連線至 Gemini API：【{client_err_msg}】。請前往 Streamlit Cloud ➔ Manage App ➔ Settings ➔ Secrets 設定 `GEMINI_API_KEY`。")
     elif not filtered_df.empty:
         stock_options = [f"{row['股票代碼']} {row['股票名稱']}" for _, row in filtered_df.iterrows()]
         selected_stock_str = st.selectbox("請選擇欲診斷的低估潛力標的：", options=stock_options)
@@ -217,14 +223,14 @@ with tab3:
                 5. **總結與長期持有建議**
                 """
                 
-                # 自動輪詢支援的模型清單，徹底解決 404 NOT_FOUND 錯誤
-                candidate_models = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.5-pro", "gemini-1.5-flash"]
+                # 自動輪詢官方模型，避免 404 錯誤
+                candidate_models = ["gemini-2.0-flash", "gemini-1.5-flash"]
                 ai_success = False
                 last_ex = None
 
                 for model_name in candidate_models:
                     try:
-                        response = client.models.generate_content(
+                        response = client.generate_content(
                             model=model_name,
                             contents=prompt
                         )
@@ -237,7 +243,7 @@ with tab3:
                         continue
                 
                 if not ai_success:
-                    st.warning("目前 Gemini API 模型正在更新調校中，請確認您的 API 金鑰已於 Secrets 正確填寫。")
+                    st.error(f"❌ AI 分析產生失敗，詳細 API 回傳訊息為：`{str(last_ex)}`。請檢查 API Key 是否正確設定或存取額度正常。")
     else:
         st.warning("目前清單中尚無合格標的，請先放寬側邊欄的篩選條件。")
 
@@ -246,5 +252,3 @@ with tab3:
 # ----------------------------------------------------
 st.markdown("---")
 st.caption(f"系統版本：{APP_VERSION} ｜ 最後更新日期：{APP_DATE} ｜ 資料來源：臺灣證券交易所、櫃買中心與公開資訊觀測站")
-
-
