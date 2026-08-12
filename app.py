@@ -1,7 +1,10 @@
 # ====================================================
 # 台股價值與潛力股智慧分析系統 (Taiwan Stock Screener)
-# 版本別 (Version): v1.1.0
+# 版本別 (Version): v1.1.1
 # 更新日期 (Date): 2026-08-12
+# 修改重點: 
+#   1. 修正 Gemini AI 個股診斷 KeyError 錯誤 (統一欄位名稱為 '次產業_PE折溢價(%)')
+#   2. 於側邊欄 ROE 與 營收 YoY 門檻標題旁加入「[越高代表...]」說明標籤
 # ====================================================
 
 import json
@@ -14,7 +17,7 @@ from google import genai
 # ----------------------------------------------------
 # 1. 網頁基本設定 (Page Config)
 # ----------------------------------------------------
-APP_VERSION = "v1.1.0"
+APP_VERSION = "v1.1.1"
 APP_DATE = "2026-08-12"
 
 st.set_page_config(
@@ -134,13 +137,13 @@ pe_discount_cutoff = st.sidebar.slider(
 )
 
 roe_cutoff = st.sidebar.number_input(
-    "最低 ROE 門檻 (%)",
+    "最低 ROE 門檻 (%) [越高代表獲利越佳]",
     min_value=0.0, max_value=50.0, value=10.0, step=1.0,
     help="篩選股東權益報酬率高於此標準的績優股。"
 )
 
 yoy_cutoff = st.sidebar.number_input(
-    "近12個月營收 YoY 成長率門檻 (%)",
+    "近12個月營收 YoY 成長率門檻 (%) [越高代表成長越強]",
     min_value=-30.0, max_value=100.0, value=-5.0, step=1.0,
     help="允許短線營收小幅波動但仍具低估價值的標的。"
 )
@@ -198,7 +201,7 @@ with tab3:
 
                 - 股票：{target_row['股票代碼']} {target_row['股票名稱']} ({target_row['市場']})
                 - 細分次產業：{target_row['開源_次產業']}
-                - 本益比 (PE)：{target_row['官方_PE']} (次產業中位數 PE：{target_row['次產業_中位數PE']}，折價 {target_row['次產業_PE溢價率(%)']}%)
+                - 本益比 (PE)：{target_row['官方_PE']} (次產業中位數 PE：{target_row['次產業_中位數PE']}，折價 {target_row['次產業_PE折溢價(%)']}%)
                 - ROE：{target_row['MOPS官方_ROE(%)']}%
                 - 近12月營收 YoY：{target_row['近12月營收YoY(%)']}%
 
@@ -226,3 +229,6 @@ with tab3:
 # ----------------------------------------------------
 st.markdown("---")
 st.caption(f"系統版本：{APP_VERSION} ｜ 最後更新日期：{APP_DATE} ｜ 資料來源：臺灣證券交易所、櫃買中心與公開資訊觀測站")
+```
+
+只需複製上面視窗中的完整程式碼，貼到 GitHub 的 `app.py` 替換並提交，Streamlit Cloud 即可自動部署更新 **v1.1.1**！
