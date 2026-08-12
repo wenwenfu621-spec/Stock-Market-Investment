@@ -7,17 +7,15 @@ from google import genai
 
 # ==========================================
 # 版本資訊 (Version Info)
-# 版本別：v1.2.6
+# 版本別：v1.2.7
 # 更新日期：2026-08-12
 # 修改內容：
-# 1. 修復 33 大產業別精準映射與 8 大主軸顏色標籤顯示。
-# 2. 修復單股獨立查詢看板與真實數據比對。
-# 3. 欄位自訂順序 Session 記憶機制。
-# 4. 正確載入 Avatar.png 與懸浮卡片位置。
-# 5. 保留側邊欄輔助說明與雙源資料對照表。
+# 1. 修復個股搜尋比對邏輯（強制轉字串與去除空白，解決 6538 等代號查無資料問題）。
+# 2. 側邊欄新增「🔄 重新載入證交所最新數據」手動更新按鈕。
+# 3. 完整保留 33 大產業色彩標籤、欄位 Session 記憶與 Design by Max 懸浮卡片。
 # ==========================================
 
-VERSION = "v1.2.6"
+VERSION = "v1.2.7"
 UPDATE_DATE = "2026-08-12"
 
 st.set_page_config(
@@ -122,36 +120,40 @@ def get_industry_color(industry_name):
         return "⚪ " + industry_name
 
 def infer_industry(code, name):
-    if code in INDUSTRY_MAP:
-        return INDUSTRY_MAP[code]
+    code_str = str(code).strip()
+    if code_str in INDUSTRY_MAP:
+        return INDUSTRY_MAP[code_str]
     
-    if code.startswith("28"):
+    if code_str.startswith("28"):
         return "金融保險業"
-    elif code.startswith("11"):
+    elif code_str.startswith("11"):
         return "水泥工業"
-    elif code.startswith("12"):
+    elif code_str.startswith("12"):
         return "食品工業"
-    elif code.startswith("13"):
+    elif code_str.startswith("13"):
         return "塑膠工業"
-    elif code.startswith("14"):
+    elif code_str.startswith("14"):
         return "紡織纖維"
-    elif code.startswith("15") or code.startswith("16"):
+    elif code_str.startswith("15") or code_str.startswith("16"):
         return "電機機械"
-    elif code.startswith("17") or code.startswith("41") or code.startswith("64"):
+    elif code_str.startswith("17") or code_str.startswith("41") or code_str.startswith("64"):
         return "生技醫療業"
-    elif code.startswith("20"):
+    elif code_str.startswith("20"):
         return "鋼鐵工業"
-    elif code.startswith("22"):
+    elif code_str.startswith("22"):
         return "汽車工業"
-    elif code.startswith("23") or code.startswith("24"):
-        return "半導體業" if int(code) % 2 == 0 else "電子零組件業"
-    elif code.startswith("25"):
+    elif code_str.startswith("23") or code_str.startswith("24"):
+        try:
+            return "半導體業" if int(code_str) % 2 == 0 else "電子零組件業"
+        except ValueError:
+            return "半導體業"
+    elif code_str.startswith("25"):
         return "建材營造"
-    elif code.startswith("26"):
+    elif code_str.startswith("26"):
         return "航運業"
-    elif code.startswith("29") or code.startswith("59"):
+    elif code_str.startswith("29") or code_str.startswith("59"):
         return "百貨貿易"
-    elif code.startswith("30") or code.startswith("35") or code.startswith("65"):
+    elif code_str.startswith("30") or code_str.startswith("35") or code_str.startswith("65"):
         return "電腦及週邊設備業"
     else:
         return "其他電子業"
@@ -169,8 +171,8 @@ def load_stock_data():
             df_raw = pd.DataFrame(data)
             
             df = pd.DataFrame({
-                "Code": df_raw["Code"],
-                "Name": df_raw["Name"],
+                "Code": df_raw["Code"].astype(str).str.strip(),
+                "Name": df_raw["Name"].astype(str).str.strip(),
                 "PE": pd.to_numeric(df_raw["PEratio"], errors='coerce'),
                 "PB": pd.to_numeric(df_raw["PBratio"], errors='coerce'),
                 "DY": pd.to_numeric(df_raw["DividendYield"], errors='coerce'),
@@ -215,6 +217,8 @@ def load_stock_data():
             {"Code": "6538", "Name": "倉和", "PE": 16.8, "Sector_PE_Median": 22.0, "ROE": 19.5, "YoY": 12.4, "Foreign_Hold": 18.2, "Debt_Ratio": 35.1}
         ]
         df = pd.DataFrame(fallback_data)
+        df["Code"] = df["Code"].astype(str).str.strip()
+        df["Name"] = df["Name"].astype(str).str.strip()
         df["Industry"] = df.apply(lambda r: infer_industry(r["Code"], r["Name"]), axis=1)
         df["Industry_Tagged"] = df["Industry"].apply(get_industry_color)
         df["次產業_PE折溢價(%)"] = ((df["PE"] - df["Sector_PE_Median"]) / df["Sector_PE_Median"]) * 100
@@ -227,6 +231,12 @@ df_stocks, is_fallback = load_stock_data()
 # ==========================================
 st.sidebar.header("⚙️ 篩選條件設定")
 st.sidebar.caption(f"目前版本：{VERSION}")
+
+# 手動重新載入證交所最新數據按鈕
+if st.sidebar.button("🔄 重新載入證交所最新數據"):
+    st.cache_data.clear()
+    st.sidebar.success("已成功重新載入證交所最新資料！")
+    st.rerun()
 
 # 單一個股精準獨立查詢
 st.sidebar.subheader("🔍 單一個股獨立查詢與健診")
@@ -296,9 +306,12 @@ tab1, tab2, tab3 = st.tabs(["📊 篩選總覽與核心數據", "🔍 雙源資�
 with tab1:
     if final_search_code:
         st.subheader("🎯 單一個股獨立健診與數據看板")
+        
+        # 強制轉字串並修剪空白後進行比對
+        clean_search_target = str(final_search_code).strip()
         matched_stocks = df_stocks[
-            (df_stocks["Code"] == final_search_code) | 
-            (df_stocks["Name"].str.contains(final_search_code, na=False))
+            (df_stocks["Code"].str.lower() == clean_search_target.lower()) | 
+            (df_stocks["Name"].str.lower().str.contains(clean_search_target.lower(), na=False))
         ]
         
         if len(matched_stocks) > 0:
@@ -328,7 +341,7 @@ with tab1:
             else:
                 st.warning(f"⚠️ **{stock_data['Name']} ({stock_data['Code']}) 未達部分設定門檻，未通過項目如下：**\n\n" + "\n\n".join(mismatches))
         else:
-            st.error(f"⚠️ **查無代號/名稱為 `{final_search_code}` 之股票數據，請確認代號是否輸入正確。**")
+            st.error(f"⚠️ **查無代號/名稱為 `{final_search_code}` 之股票數據，請確認代號是否輸入正確，或點擊左側「🔄 重新載入證交所最新數據」按鈕。**")
             
         st.markdown("---")
 
