@@ -1,11 +1,11 @@
 # ====================================================
 # 台股價值與潛力股智慧分析系統 (Taiwan Stock Screener)
-# 版本別 (Version): v1.1.2
+# 版本別 (Version): v1.1.3
 # 更新日期 (Date): 2026-08-12
 # 修改重點: 
-#   1. 清除檔尾雜訊文字，避免複製貼上引發 SyntaxError
-#   2. 修正 Gemini AI 個股診斷 KeyError 錯誤 (統一欄位名稱為 '次產業_PE折溢價(%)')
-#   3. 於側邊欄 ROE 與 營收 YoY 門檻標題旁加入「[越高代表...]」說明標籤
+#   1. 修正 Gemini API 模型 404 錯誤 (改用 gemini-1.5-flash 標準模型)
+#   2. 修正 Gemini AI 個股診斷 KeyError 錯誤 (欄位名稱對應)
+#   3. 於側邊欄加入說明標籤
 # ====================================================
 
 import json
@@ -18,7 +18,7 @@ from google import genai
 # ----------------------------------------------------
 # 1. 網頁基本設定 (Page Config)
 # ----------------------------------------------------
-APP_VERSION = "v1.1.2"
+APP_VERSION = "v1.1.3"
 APP_DATE = "2026-08-12"
 
 st.set_page_config(
@@ -215,8 +215,9 @@ with tab3:
                 """
                 
                 try:
+                    # 使用標準相容的模型名稱 gemini-1.5-flash
                     response = client.models.generate_content(
-                        model="gemini-2.5-flash",
+                        model="gemini-1.5-flash",
                         contents=prompt
                     )
                     st.markdown(response.text)
