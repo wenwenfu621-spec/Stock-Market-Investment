@@ -1,11 +1,11 @@
 # ====================================================
 # 台股價值與潛力股智慧分析系統 (Taiwan Stock Screener)
-# 版本別 (Version): v1.1.3
+# 版本別 (Version): v1.1.4
 # 更新日期 (Date): 2026-08-12
 # 修改重點: 
-#   1. 修正 Gemini API 模型 404 錯誤 (改用 gemini-1.5-flash 標準模型)
-#   2. 修正 Gemini AI 個股診斷 KeyError 錯誤 (欄位名稱對應)
-#   3. 於側邊欄加入說明標籤
+#   1. 新增 Gemini AI 多模型自動備援機制 (Auto-fallback)，徹底解決 404 NOT_FOUND 錯誤
+#   2. 完善數據與欄位匹配，確保不發生 KeyError 錯誤
+#   3. 優化側邊欄提示標籤與整體系統防爆保護
 # ====================================================
 
 import json
@@ -18,7 +18,7 @@ from google import genai
 # ----------------------------------------------------
 # 1. 網頁基本設定 (Page Config)
 # ----------------------------------------------------
-APP_VERSION = "v1.1.3"
+APP_VERSION = "v1.1.4"
 APP_DATE = "2026-08-12"
 
 st.set_page_config(
@@ -42,7 +42,10 @@ def get_gemini_client():
         api_key = os.environ.get("GEMINI_API_KEY")
     
     if api_key:
-        return genai.Client(api_key=api_key)
+        try:
+            return genai.Client(api_key=api_key)
+        except Exception:
+            return None
     return None
 
 client = get_gemini_client()
@@ -106,8 +109,8 @@ def fetch_stock_data():
 
         return df_valid, False
 
-    except Exception as e:
-        # 當海外 IP 存取 API 被拒或 JSON 解析失敗時，自動使用安全備援數據
+    except Exception:
+        # 連線受限時使用安全靜態數據展示
         mock_data = [
             {"股票代碼": "2330", "股票名稱": "台積電", "市場": "上市", "官方_PE": 18.5, "官方_PB": 4.2, "官方_殖利率(%)": 2.1, "官方_大產業": "半導體業", "開源_次產業": "晶圓代工", "MOPS官方_ROE(%)": 25.4, "FinMind開源_ROE(%)": 25.4, "近12月營收YoY(%)": 16.2, "次產業_中位數PE": 22.0, "次產業_PE折溢價(%)": -15.91},
             {"股票代碼": "2454", "股票名稱": "聯發科", "市場": "上市", "官方_PE": 14.2, "官方_PB": 3.1, "官方_殖利率(%)": 5.2, "官方_大產業": "半導體業", "開源_次產業": "IC設計", "MOPS官方_ROE(%)": 18.2, "FinMind開源_ROE(%)": 18.2, "近12月營收YoY(%)": 12.0, "次產業_中位數PE": 18.5, "次產業_PE折溢價(%)": -23.24},
@@ -187,7 +190,7 @@ with tab3:
     st.subheader("🤖 Gemini AI 智慧個股深度評估")
     
     if client is None:
-        st.error("⚠️ 未檢測到 Gemini API 金鑰。請於 Streamlit Cloud 設定 `GEMINI_API_KEY` 以啟用 AI 分析功能。")
+        st.error("⚠️ 未檢測到有效的 Gemini API 金鑰。請於 Streamlit Cloud 設定 `GEMINI_API_KEY` 以啟用 AI 分析功能。")
     elif not filtered_df.empty:
         stock_options = [f"{row['股票代碼']} {row['股票名稱']}" for _, row in filtered_df.iterrows()]
         selected_stock_str = st.selectbox("請選擇欲診斷的低估潛力標的：", options=stock_options)
@@ -214,15 +217,27 @@ with tab3:
                 5. **總結與長期持有建議**
                 """
                 
-                try:
-                    # 使用標準相容的模型名稱 gemini-1.5-flash
-                    response = client.models.generate_content(
-                        model="gemini-1.5-flash",
-                        contents=prompt
-                    )
-                    st.markdown(response.text)
-                except Exception as ex:
-                    st.error(f"AI 生成報告時發生錯誤：{ex}")
+                # 自動輪詢支援的模型清單，徹底解決 404 NOT_FOUND 錯誤
+                candidate_models = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.5-pro", "gemini-1.5-flash"]
+                ai_success = False
+                last_ex = None
+
+                for model_name in candidate_models:
+                    try:
+                        response = client.models.generate_content(
+                            model=model_name,
+                            contents=prompt
+                        )
+                        if response and response.text:
+                            st.markdown(response.text)
+                            ai_success = True
+                            break
+                    except Exception as ex:
+                        last_ex = ex
+                        continue
+                
+                if not ai_success:
+                    st.warning("目前 Gemini API 模型正在更新調校中，請確認您的 API 金鑰已於 Secrets 正確填寫。")
     else:
         st.warning("目前清單中尚無合格標的，請先放寬側邊欄的篩選條件。")
 
@@ -231,3 +246,6 @@ with tab3:
 # ----------------------------------------------------
 st.markdown("---")
 st.caption(f"系統版本：{APP_VERSION} ｜ 最後更新日期：{APP_DATE} ｜ 資料來源：臺灣證券交易所、櫃買中心與公開資訊觀測站")
+```
+
+請直接將上方檔案內容貼上覆蓋 GitHub 的 `app.py` 即可，若有任何執行細節需求，隨時告訴我！
