@@ -2,20 +2,22 @@ import streamlit as st
 import pandas as pd
 import requests
 import os
+import base64
 from google import genai
 
 # ==========================================
 # 版本資訊 (Version Info)
-# 版本別：v1.2.1
+# 版本別：v1.2.3
 # 更新日期：2026-08-12
 # 修改內容：
-# 1. 補回左側欄位 [數值代表含意] 輔助說明。
-# 2. 新增右下角固定懸浮個人識別卡 (Design by Max)。
-# 3. 新增單一個股獨立查詢與不符條件提醒標記。
-# 4. 修復「雙源資料對照表」分頁，呈現官方與開源數據對比表格。
+# 1. 新增單一個股獨立健診看板（完整顯示數據與不符項目提醒）。
+# 2. 支援欄位拖曳順序與 Session 記憶機制。
+# 3. 正確讀取 GitHub Avatar.png 並校正右下角個人識別卡位置。
+# 4. 補回側邊欄 [數值代表含意] 輔助說明。
+# 5. 修復雙源資料對照表。
 # ==========================================
 
-VERSION = "v1.2.1"
+VERSION = "v1.2.3"
 UPDATE_DATE = "2026-08-12"
 
 st.set_page_config(
@@ -24,33 +26,52 @@ st.set_page_config(
     layout="wide"
 )
 
+# 讀取 GitHub 中的 Avatar.png
+def get_avatar_base64():
+    avatar_path = "Avatar.png"
+    if os.path.exists(avatar_path):
+        try:
+            with open(avatar_path, "rb") as f:
+                data = f.read()
+            return f"data:image/png;base64,{base64.b64encode(data).decode()}"
+        except Exception:
+            return None
+    return None
+
+avatar_b64 = get_avatar_base64()
+
+if avatar_b64:
+    avatar_html = f'<img src="{avatar_b64}" style="width: 28px; height: 28px; border-radius: 50%; object-fit: cover;">'
+else:
+    avatar_html = '<span style="font-size: 20px;">🧔🏻‍♂️</span>'
+
 # 右下角固定懸浮個人識別卡 (Design by Max)
-st.markdown("""
+st.markdown(f"""
 <style>
-.floating-card {
+.floating-card {{
     position: fixed;
-    bottom: 20px;
-    right: 20px;
+    bottom: 18px;
+    right: 150px;
     background-color: #ffffff;
-    padding: 8px 16px;
+    padding: 6px 16px;
     border-radius: 25px;
     box-shadow: 0px 4px 12px rgba(0, 0, 0, 0.15);
     display: flex;
     align-items: center;
     gap: 10px;
-    z-index: 9999;
+    z-index: 99999;
     border: 1px solid #e0e0e0;
-}
-.floating-card span.designer-title {
-    font-family: 'Georgia', 'Comic Sans MS', cursive, serif;
+}}
+.floating-card span.designer-title {{
+    font-family: 'Brush Script MT', 'Caveat', 'Comic Sans MS', cursive, serif;
     font-style: italic;
     font-weight: bold;
-    font-size: 15px;
+    font-size: 18px;
     color: #222222;
-}
+}}
 </style>
 <div class="floating-card">
-    <span style="font-size: 20px;">🧔🏻‍♂️</span>
+    {avatar_html}
     <span class="designer-title">Design by Max</span>
 </div>
 """, unsafe_allow_html=True)
@@ -68,7 +89,7 @@ INDUSTRY_MAP = {
     "2881": "金融保險業", "2882": "金融保險業", "2892": "金融保險業", "2886": "金融保險業", "2884": "金融保險業",
     "1101": "水泥工業", "1102": "水泥工業", "1301": "塑膠工業", "1303": "塑膠工業",
     "2002": "鋼鐵工業", "1216": "食品工業", "2603": "航運業", "2609": "航運業", "2615": "航運業",
-    "2542": "建材營造", "2511": "建材營造", "1707": "生技醫療業", "6446": "生技醫療業"
+    "2542": "建材營造", "2511": "建材營造", "1707": "生技醫療業", "6446": "生技醫療業", "6538": "半導體業"
 }
 
 def get_industry_color(industry_name):
@@ -108,7 +129,8 @@ def load_stock_data():
         {"Code": "1216", "Name": "統一", "PE": 17.0, "Sector_PE_Median": 19.0, "ROE": 14.2, "YoY": 6.8, "Foreign_Hold": 45.1, "Debt_Ratio": 56.3},
         {"Code": "2603", "Name": "長榮", "PE": 5.2, "Sector_PE_Median": 8.5, "ROE": 25.4, "YoY": 15.2, "Foreign_Hold": 38.6, "Debt_Ratio": 42.8},
         {"Code": "2542", "Name": "興富發", "PE": 8.5, "Sector_PE_Median": 11.2, "ROE": 15.1, "YoY": 11.5, "Foreign_Hold": 12.4, "Debt_Ratio": 72.5},
-        {"Code": "1707", "Name": "葡萄王", "PE": 12.4, "Sector_PE_Median": 16.5, "ROE": 18.2, "YoY": 5.8, "Foreign_Hold": 15.8, "Debt_Ratio": 38.2}
+        {"Code": "1707", "Name": "葡萄王", "PE": 12.4, "Sector_PE_Median": 16.5, "ROE": 18.2, "YoY": 5.8, "Foreign_Hold": 15.8, "Debt_Ratio": 38.2},
+        {"Code": "6538", "Name": "倉和", "PE": 16.8, "Sector_PE_Median": 22.0, "ROE": 19.5, "YoY": 12.4, "Foreign_Hold": 18.2, "Debt_Ratio": 35.1}
     ]
     
     df = pd.DataFrame(fallback_data)
@@ -125,10 +147,19 @@ df_stocks, is_fallback = load_stock_data()
 st.sidebar.header("⚙️ 篩選條件設定")
 st.sidebar.caption(f"目前版本：{VERSION}")
 
-# 單一個股精準獨立查詢
+# 單一個股精準獨立查詢 (支援手動輸入或下拉選擇)
 st.sidebar.subheader("🔍 單一個股獨立查詢與健診")
+search_input = st.sidebar.text_input("輸入股票代號/名稱 (例如: 2330 或 6538)：", value="")
+
 search_stock_options = ["(不指定 / 觀看全部)"] + [f"{r['Code']} {r['Name']}" for _, r in df_stocks.iterrows()]
-selected_search_stock = st.sidebar.selectbox("請選擇或輸入欲檢視的單一個股：", search_stock_options)
+selected_search_stock = st.sidebar.selectbox("或選擇下拉清單：", search_stock_options)
+
+# 判斷最終查詢之標的代號
+final_search_code = ""
+if search_input.strip():
+    final_search_code = search_input.strip().split()[0]
+elif selected_search_stock != "(不指定 / 觀看全部)":
+    final_search_code = selected_search_stock.split()[0]
 
 st.sidebar.markdown("---")
 
@@ -136,7 +167,7 @@ st.sidebar.markdown("---")
 all_industries = ["全部產業"] + sorted(list(df_stocks["Industry"].unique()))
 selected_industry = st.sidebar.selectbox("指定產業類別", all_industries)
 
-# 2. 本益比相關篩選（包含補回之對應輔助說明）
+# 2. 本益比相關篩選 (含補回輔助說明)
 pe_discount_threshold = st.sidebar.slider(
     "次產業 PE 折價率上限 (%) [越負代表越低估]",
     min_value=-50, max_value=20, value=-5, step=5
@@ -152,7 +183,7 @@ max_stock_pe = st.sidebar.slider(
     min_value=3.0, max_value=40.0, value=25.0, step=1.0
 )
 
-# 3. 財務指標門檻（補回原始定義）
+# 3. 財務指標門檻 (含補回輔助說明)
 min_roe = st.sidebar.number_input(
     "最低 ROE 門檻 (%) [越高代表公司獲利與股東報酬越佳]",
     value=8.0, step=1.0
@@ -183,27 +214,46 @@ filtered_df = filtered_df[
 tab1, tab2, tab3 = st.tabs(["📊 篩選總覽與核心數據", "🔍 雙源資料對照表", "🧠 Gemini AI 個股診斷"])
 
 with tab1:
-    # 若選擇單一個股查詢，進行條件符合判定與提醒
-    if selected_search_stock != "(不指定 / 觀看全部)":
-        target_code = selected_search_stock.split()[0]
-        stock_data = df_stocks[df_stocks["Code"] == target_code].iloc[0]
+    # 獨立單股健診專區
+    if final_search_code:
+        st.subheader("🎯 單一個股獨立健診與數據看板")
+        matched_stocks = df_stocks[
+            (df_stocks["Code"] == final_search_code) | 
+            (df_stocks["Name"].str.contains(final_search_code, na=False))
+        ]
         
-        mismatches = []
-        if stock_data["次產業_PE折溢價(%)"] > pe_discount_threshold:
-            mismatches.append(f"❌ 次產業 PE 折價率：目前 `{stock_data['次產業_PE折溢價(%)']:.1f}%` (門檻需求 `<= {pe_discount_threshold}%`)")
-        if stock_data["Sector_PE_Median"] > max_sector_pe:
-            mismatches.append(f"❌ 次產業 PE 中位數：目前 `{stock_data['Sector_PE_Median']:.1f}倍` (門檻需求 `<= {max_sector_pe}倍`)")
-        if stock_data["PE"] > max_stock_pe:
-            mismatches.append(f"❌ 個股本益比 (PE)：目前 `{stock_data['PE']:.1f}倍` (門檻需求 `<= {max_stock_pe}倍`)")
-        if stock_data["ROE"] < min_roe:
-            mismatches.append(f"❌ ROE 獲利門檻：目前 `{stock_data['ROE']:.1f}%` (門檻需求 `>= {min_roe}%`)")
-        if stock_data["YoY"] < min_yoy:
-            mismatches.append(f"❌ 營收 YoY 成長率：目前 `{stock_data['YoY']:.1f}%` (門檻需求 `>= {min_yoy}%`)")
+        if len(matched_stocks) > 0:
+            stock_data = matched_stocks.iloc[0]
+            
+            # 單股核心指標展現
+            sc1, sc2, sc3, sc4, sc5 = st.columns(5)
+            sc1.metric("個股名稱", f"{stock_data['Name']} ({stock_data['Code']})")
+            sc2.metric("本益比 (PE)", f"{stock_data['PE']:.1f} 倍")
+            sc3.metric("次產業 PE 折價率", f"{stock_data['次產業_PE折溢價(%)']:.1f}%")
+            sc4.metric("ROE (%)", f"{stock_data['ROE']:.1f}%")
+            sc5.metric("外資持股比 (%)", f"{stock_data['Foreign_Hold']:.1f}%")
+            
+            # 比對未達標項目
+            mismatches = []
+            if stock_data["次產業_PE折溢價(%)"] > pe_discount_threshold:
+                mismatches.append(f"❌ 次產業 PE 折價率：目前 `{stock_data['次產業_PE折溢價(%)']:.1f}%` (要求 `<= {pe_discount_threshold}%`)")
+            if stock_data["Sector_PE_Median"] > max_sector_pe:
+                mismatches.append(f"❌ 次產業 PE 中位數：目前 `{stock_data['Sector_PE_Median']:.1f}倍` (要求 `<= {max_sector_pe}倍`)")
+            if stock_data["PE"] > max_stock_pe:
+                mismatches.append(f"❌ 個股本益比 (PE)：目前 `{stock_data['PE']:.1f}倍` (要求 `<= {max_stock_pe}倍`)")
+            if stock_data["ROE"] < min_roe:
+                mismatches.append(f"❌ ROE 獲利門檻：目前 `{stock_data['ROE']:.1f}%` (要求 `>= {min_roe}%`)")
+            if stock_data["YoY"] < min_yoy:
+                mismatches.append(f"❌ 營收 YoY 成長率：目前 `{stock_data['YoY']:.1f}%` (要求 `>= {min_yoy}%`)")
 
-        if len(mismatches) == 0:
-            st.success(f"✅ **單股查詢提醒：{selected_search_stock} 完全符合當前所有篩選門檻條件！**")
+            if len(mismatches) == 0:
+                st.success(f"✅ **恭喜！{stock_data['Name']} ({stock_data['Code']}) 完全符合您當前的所有篩選門檻條件！**")
+            else:
+                st.warning(f"⚠️ **{stock_data['Name']} ({stock_data['Code']}) 未達部分設定門檻，未通過項目如下：**\n\n" + "\n\n".join(mismatches))
         else:
-            st.warning(f"⚠️ **單股查詢提醒：{selected_search_stock} 未達部分設定門檻，具體不符項目如下：**\n\n" + "\n\n".join(mismatches))
+            st.error(f"⚠️ **查無代號/名稱為 `{final_search_code}` 之股票數據，請確認代號是否輸入正確。**")
+            
+        st.markdown("---")
 
     col1, col2, col3 = st.columns(3)
     col1.metric("上市櫃掃描總數", f"{len(df_stocks)} 檔")
@@ -214,7 +264,7 @@ with tab1:
     st.subheader("🎯 Qualified Stock Targets (合格標的清單)")
     
     if len(filtered_df) > 0:
-        st.markdown("##### ⚙️ 表格顯示欄位自訂（預設鎖定前兩欄：股票代號、股票名稱）")
+        st.markdown("##### ⚙️ 表格顯示欄位自訂與順序調整（可拖曳排順序，自動記憶）")
         
         all_optional_cols = {
             "產業類別": "Industry_Tagged",
@@ -227,13 +277,21 @@ with tab1:
             "負債比(%)": "Debt_Ratio"
         }
         
+        # 使用 Session State 記憶使用者偏好的欄位順序
+        if "saved_col_order" not in st.session_state:
+            st.session_state["saved_col_order"] = ["產業類別", "本益比(PE)", "次產業中位數PE", "次產業 PE 折溢價(%)", "ROE(%)", "外資持股比(%)", "負債比(%)", "營收 YoY(%)"]
+
         selected_col_names = st.multiselect(
-            "請選擇要於畫面顯示的延伸數據項目：",
+            "請選擇要於畫面顯示的延伸數據項目 (可點擊刪除或重新排序)：",
             options=list(all_optional_cols.keys()),
-            default=["產業類別", "本益比(PE)", "次產業中位數PE", "次產業 PE 折溢價(%)", "ROE(%)", "外資持股比(%)", "負債比(%)"]
+            default=st.session_state["saved_col_order"]
         )
         
-        display_cols = ["Code", "Name"] + [all_optional_cols[c] for c in selected_col_names]
+        # 即時更新並記憶選擇順序
+        if selected_col_names != st.session_state["saved_col_order"]:
+            st.session_state["saved_col_order"] = selected_col_names
+        
+        display_cols = ["Code", "Name"] + [all_optional_cols[c] for c in selected_col_names if c in all_optional_cols]
         rename_dict = {
             "Code": "股票代號",
             "Name": "股票名稱",
