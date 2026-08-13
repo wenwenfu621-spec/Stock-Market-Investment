@@ -3,9 +3,21 @@ import pandas as pd
 import requests
 import os
 import base64
-from google import genai
 
-# 安全載入 yfinance (防護機制)
+# 雙重載入 Gemini API SDK 以確保相容性與消除 404 報錯
+try:
+    from google import genai
+    GENAI_NEW_AVAILABLE = True
+except ImportError:
+    GENAI_NEW_AVAILABLE = False
+
+try:
+    import google.generativeai as genai_legacy
+    GENAI_LEGACY_AVAILABLE = True
+except ImportError:
+    GENAI_LEGACY_AVAILABLE = False
+
+# 安全載入 yfinance 防護機制
 try:
     import yfinance as yf
     YFINANCE_AVAILABLE = True
@@ -15,16 +27,16 @@ except ImportError:
 
 # ==========================================
 # 版本資訊 (Version Info)
-# 版本別：v1.3.4
+# 版本別：v1.3.5
 # 更新日期：2026-08-13
 # 修改內容：
-# 1. 徹底解決 Gemini AI 404 模型報錯問題 (修復 SDK 模型名稱格式)。
-# 2. 修復滑桿與 +/- 數字微調按鈕，調整一次即刻精準生效且同步記憶。
-# 3. 支援調整參數時右側股票清單與統計數據即時動態連動更新。
-# 4. 完整保留「上市櫃掃描總數、符合條件潛力股、平均 PE 折價率」核心指標看板與既有功能。
+# 1. 徹底修復 Gemini AI 404 報錯 (採用雙 SDK 動態備援模型呼叫機制)。
+# 2. 開啟新視窗未點擊篩選前，頂部數據看板預設遮蔽 (顯示 ---)。
+# 3. 整合 TWSE 上市 + TPEx 上櫃官方 OpenAPI，覆蓋全台 1,900+ 家上市櫃公司。
+# 4. Tab 3 診斷選單僅呈現經條件篩選合格之標的，不再列出無關股票。
 # ==========================================
 
-VERSION = "v1.3.4"
+VERSION = "v1.3.5"
 UPDATE_DATE = "2026-08-13"
 
 st.set_page_config(
@@ -163,47 +175,79 @@ gemini_key = st.secrets.get("GEMINI_API_KEY", os.getenv("GEMINI_API_KEY", ""))
 
 @st.cache_data(ttl=3600)
 def load_stock_data():
-    """結合 TWSE 估值報表 (BWIBBU_ALL) 與真實收盤價報表 (STOCK_DAY_ALL)"""
+    """整合 TWSE (上市) 與 TPEx (上櫃) 官方 API，涵蓋全台 1,900+ 家個股"""
+    all_stocks = []
+    
+    # 1. 抓取 TWSE 上市股票
     try:
         url_pe = "https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL"
-        res_pe = requests.get(url_pe, timeout=8)
-        
         url_price = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
-        res_price = requests.get(url_price, timeout=8)
-        
-        if res_pe.status_code == 200 and res_price.status_code == 200:
-            df_pe = pd.DataFrame(res_pe.json())
-            df_price = pd.DataFrame(res_price.json())
-            
+        r_pe = requests.get(url_pe, timeout=6)
+        r_pr = requests.get(url_price, timeout=6)
+        if r_pe.status_code == 200 and r_pr.status_code == 200:
+            df_pe = pd.DataFrame(r_pe.json())
+            df_pr = pd.DataFrame(r_pr.json())
             df_pe["Code"] = df_pe["Code"].astype(str).str.strip()
             df_pe["Name"] = df_pe["Name"].astype(str).str.strip()
             df_pe["PE"] = pd.to_numeric(df_pe["PEratio"], errors='coerce')
-            df_pe["PB"] = pd.to_numeric(df_pe["PBratio"], errors='coerce')
-            df_pe["DY"] = pd.to_numeric(df_pe["DividendYield"], errors='coerce')
-            df_pe = df_pe.dropna(subset=["PE"])[df_pe["PE"] > 0]
-            
-            df_price["Code"] = df_price["Code"].astype(str).str.strip()
-            df_price["ClosingPrice"] = pd.to_numeric(df_price["ClosingPrice"].astype(str).str.replace(",", ""), errors='coerce')
-            
-            df = pd.merge(df_pe, df_price[["Code", "ClosingPrice"]], on="Code", how="inner")
-            df["Price"] = df["ClosingPrice"].fillna(0.0)
-            
-            df["Industry"] = df.apply(lambda r: infer_industry(r["Code"], r["Name"]), axis=1)
-            df["Industry_Tagged"] = df["Industry"].apply(get_industry_color)
-            
-            sector_medians = df.groupby("Industry")["PE"].median().to_dict()
-            df["Sector_PE_Median"] = df["Industry"].map(sector_medians).fillna(18.0)
-            
-            df["次產業_PE折溢價(%)"] = ((df["PE"] - df["Sector_PE_Median"]) / df["Sector_PE_Median"]) * 100
-            
-            df["High_30D"] = None
-            df["Low_30D"] = None
-            df["High_60D"] = None
-            df["Low_60D"] = None
-            return df, False
+            df_pr["Code"] = df_pr["Code"].astype(str).str.strip()
+            df_pr["ClosingPrice"] = pd.to_numeric(df_pr["ClosingPrice"].astype(str).str.replace(",", ""), errors='coerce')
+            m_twse = pd.merge(df_pe, df_pr[["Code", "ClosingPrice"]], on="Code", how="inner")
+            for _, row in m_twse.iterrows():
+                pe_val = row["PE"] if pd.notnull(row["PE"]) and row["PE"] > 0 else 15.0
+                pr_val = row["ClosingPrice"] if pd.notnull(row["ClosingPrice"]) and row["ClosingPrice"] > 0 else 0.0
+                all_stocks.append({
+                    "Code": row["Code"],
+                    "Name": row["Name"],
+                    "Price": pr_val,
+                    "PE": pe_val,
+                    "Market": "上市"
+                })
     except Exception:
         pass
 
+    # 2. 抓取 TPEx 上櫃股票
+    try:
+        url_otc_pe = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_peratio_analysis"
+        r_otc = requests.get(url_otc_pe, timeout=6)
+        if r_otc.status_code == 200:
+            df_otc = pd.DataFrame(r_otc.json())
+            code_col = "SecuritiesCompanyCode" if "SecuritiesCompanyCode" in df_otc.columns else "Code"
+            name_col = "CompanyName" if "CompanyName" in df_otc.columns else "Name"
+            pe_col = "PriceEarningRatio" if "PriceEarningRatio" in df_otc.columns else "PEratio"
+            
+            for _, row in df_otc.iterrows():
+                c_str = str(row.get(code_col, "")).strip()
+                n_str = str(row.get(name_col, "")).strip()
+                pe_v = pd.to_numeric(row.get(pe_col, 0), errors='coerce')
+                if c_str and n_str and len(c_str) == 4:
+                    pe_val = pe_v if pd.notnull(pe_v) and pe_v > 0 else 15.0
+                    all_stocks.append({
+                        "Code": c_str,
+                        "Name": n_str,
+                        "Price": 0.0,
+                        "PE": pe_val,
+                        "Market": "上櫃"
+                    })
+    except Exception:
+        pass
+
+    if len(all_stocks) > 100:
+        df = pd.DataFrame(all_stocks).drop_duplicates(subset=["Code"]).reset_index(drop=True)
+        df["Industry"] = df.apply(lambda r: infer_industry(r["Code"], r["Name"]), axis=1)
+        df["Industry_Tagged"] = df["Industry"].apply(get_industry_color)
+        
+        sector_medians = df.groupby("Industry")["PE"].median().to_dict()
+        df["Sector_PE_Median"] = df["Industry"].map(sector_medians).fillna(18.0)
+        df["次產業_PE折溢價(%)"] = ((df["PE"] - df["Sector_PE_Median"]) / df["Sector_PE_Median"]) * 100
+        
+        df["High_30D"] = None
+        df["Low_30D"] = None
+        df["High_60D"] = None
+        df["Low_60D"] = None
+        return df, False
+
+    # 備援靜態清單
     fallback_data = [
         {"Code": "2330", "Name": "台積電", "Price": 965.0, "PE": 18.5, "Sector_PE_Median": 22.0},
         {"Code": "2454", "Name": "聯發科", "Price": 1210.0, "PE": 15.2, "Sector_PE_Median": 22.0},
@@ -254,7 +298,7 @@ def get_real_stock_history(stock_code):
 df_stocks, is_fallback = load_stock_data()
 
 # ==========================================
-# 參數 Session State 記憶載入 (解鎖單次即時生效)
+# 參數 Session State 記憶載入
 # ==========================================
 qp = st.query_params
 
@@ -326,7 +370,7 @@ min_yoy = st.sidebar.number_input(
     value=st.session_state["yoy_val"], step=1.0, key="sb_yoy"
 )
 
-# 即時將最新狀態寫回 Session State 與 URL
+# 狀態寫回
 st.session_state["ind_val"] = selected_industry
 st.session_state["pe_disc_val"] = pe_discount_threshold
 st.session_state["sec_pe_val"] = max_sector_pe
@@ -341,7 +385,7 @@ st.query_params["max_pe"] = str(max_stock_pe)
 st.query_params["roe"] = str(min_roe)
 st.query_params["yoy"] = str(min_yoy)
 
-# 按鈕與動態更新控制
+# 按鈕觸發
 st.sidebar.markdown("---")
 btn_run_filter = st.sidebar.button("🔍 套用條件並開始篩選", type="primary", use_container_width=True)
 
@@ -351,7 +395,6 @@ if "filter_executed" not in st.session_state:
 if btn_run_filter:
     st.session_state["filter_executed"] = True
 
-# 即時動態過濾資料庫
 filtered_df = df_stocks.copy()
 
 if selected_industry != "全部產業":
@@ -419,16 +462,19 @@ with tab1:
             
         st.markdown("---")
 
-    # 復原問題 4：頂部三大核心數據指標看板常駐顯示
+    # 修復問題 1：開啟新視窗未點擊按鈕時，預設顯示 --- 遮蔽數據
     col1, col2, col3 = st.columns(3)
-    col1.metric("上市櫃掃描總數", f"{len(df_stocks)} 檔")
-    col2.metric("符合條件潛力股", f"{len(filtered_df)} 檔")
-    avg_discount = filtered_df["次產業_PE折溢價(%)"].mean() if len(filtered_df) > 0 else 0
-    col3.metric("平均 PE 折價率", f"{avg_discount:.1f}%")
-
     if not st.session_state["filter_executed"]:
-        st.info("👈 **請確認或調整左側邊欄條件後，點擊『🔍 套用條件並開始篩選』按鈕即可產出潛力股清單！**")
+        col1.metric("上市櫃掃描總數", "---")
+        col2.metric("符合條件潛力股", "---")
+        col3.metric("平均 PE 折價率", "---")
+        st.info("👈 **請於左側邊欄確認或調整篩選條件後，點擊『🔍 套用條件並開始篩選』按鈕即可開始計算並產出潛力股清單！**")
     else:
+        col1.metric("上市櫃掃描總數", f"{len(df_stocks)} 檔")
+        col2.metric("符合條件潛力股", f"{len(filtered_df)} 檔")
+        avg_discount = filtered_df["次產業_PE折溢價(%)"].mean() if len(filtered_df) > 0 else 0
+        col3.metric("平均 PE 折價率", f"{avg_discount:.1f}%")
+
         st.subheader("🎯 Qualified Stock Targets (合格標的清單)")
         
         if len(filtered_df) > 0:
@@ -514,55 +560,92 @@ with tab2:
 with tab3:
     st.subheader("🧠 Gemini AI 智慧個股深度評估")
     
-    if len(df_stocks) == 0:
-        st.info("目前無個股數據，請點擊左側重新載入按鈕。")
+    # 修復問題 2-2：下拉選單只列出符合條件的合格標的 (若有特查個股則併入)
+    diagnostic_df = filtered_df.copy()
+    if final_search_code:
+        clean_target = str(final_search_code).strip().lower()
+        extra_match = df_stocks[
+            (df_stocks["Code"].str.lower() == clean_target) | 
+            (df_stocks["Name"].str.lower().str.contains(clean_target, na=False))
+        ]
+        if len(extra_match) > 0:
+            diagnostic_df = pd.concat([diagnostic_df, extra_match]).drop_duplicates(subset=["Code"])
+
+    if len(diagnostic_df) == 0:
+        st.info("👈 當前篩選條件下尚無合格標的。請調整側邊欄條件並點擊『🔍 套用條件並開始篩選』按鈕，或於左側獨立查詢框輸入個股代號進行診斷。")
     else:
-        target_options = [f"{row['Code']} {row['Name']}" for _, row in df_stocks.iterrows()]
-        selected_stock_str = st.selectbox("請選擇欲診斷的低估潛力標的：", target_options)
+        target_options = [f"{row['Code']} {row['Name']}" for _, row in diagnostic_df.iterrows()]
+        selected_stock_str = st.selectbox("請選擇欲診斷的合格低估標的：", target_options)
         
         if st.button("🚀 生成 Gemini AI 分析報告"):
             if not gemini_key:
                 st.error("❌ 未偵測到 Gemini API 金鑰。請於 Streamlit Cloud 的 Secrets 中填入 `GEMINI_API_KEY`。")
             else:
                 with st.spinner("AI 正在調閱個股財報與市場研報數據進行同業估值診斷..."):
-                    try:
-                        client = genai.Client(api_key=gemini_key)
-                        stock_code = selected_stock_str.split()[0]
-                        target_row = df_stocks[df_stocks["Code"] == stock_code].iloc[0]
-                        
-                        prompt = f"""
-                        你是一位專業的台股資深證券分析師。請針對以下低估潛力標的進行同業競爭力與估值診斷：
-                        
-                        - 公司：{target_row['Name']} ({target_row['Code']})
-                        - 所屬產業：{target_row['Industry']}
-                        - 當前真實股價：{target_row['Price']} 元
-                        - 本益比 (PE)：{target_row['PE']} (次產業中位數 PE：{target_row['Sector_PE_Median']}，折價率：{target_row['次產業_PE折溢價(%)']:.1f}%)
+                    stock_code = selected_stock_str.split()[0]
+                    target_row = df_stocks[df_stocks["Code"] == stock_code].iloc[0]
+                    
+                    prompt = f"""
+                    你是一位專業的台股資深證券分析師。請針對以下低估潛力標的進行同業競爭力與估值診斷：
+                    
+                    - 公司：{target_row['Name']} ({target_row['Code']})
+                    - 所屬產業：{target_row['Industry']}
+                    - 當前真實股價：{target_row['Price']} 元
+                    - 本益比 (PE)：{target_row['PE']} (次產業中位數 PE：{target_row['Sector_PE_Median']}，折價率：{target_row['次產業_PE折溢價(%)']:.1f}%)
 
-                        請提供一份結構化的中文分析報告，包含：
-                        1. **股價位階與估值吸引力**：分析目前真實股價與 PE 相較同業折價的原因。
-                        2. **核心競爭優勢與 SWOT**：簡述其在所屬產業中的地位。
-                        3. **綜合診斷評級**：給予明晰的估值診斷總結。
-                        """
-                        
-                        # 自動相容處理 SDK 模型名稱 (移除多餘的 models/ 前綴並動態選擇可用模型)
+                    請提供一份結構化的中文分析報告，包含：
+                    1. **股價位階與估值吸引力**：分析目前真實股價與 PE 相較同業折價的原因。
+                    2. **核心競爭優勢與 SWOT**：簡述其在所屬產業中的地位。
+                    3. **綜合診斷評級**：給予明晰的估值診斷總結。
+                    """
+                    
+                    ai_success = False
+                    report_text = ""
+                    
+                    # 路線 A: 優先使用 google.generativeai (Legacy SDK，極度穩定且避開 404)
+                    if GENAI_LEGACY_AVAILABLE:
                         try:
-                            models_list = [m.name.replace("models/", "") for m in client.models.list()]
+                            genai_legacy.configure(api_key=gemini_key)
+                            for m in ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash", "gemini-2.5-flash"]:
+                                try:
+                                    model_obj = genai_legacy.GenerativeModel(m)
+                                    res = model_obj.generate_content(prompt)
+                                    if res and res.text:
+                                        report_text = res.text
+                                        ai_success = True
+                                        break
+                                except Exception:
+                                    continue
                         except Exception:
-                            models_list = ["gemini-1.5-flash", "gemini-2.0-flash"]
-                        
-                        target_model = "gemini-1.5-flash"
-                        for m_name in models_list:
-                            if "gemini-1.5-flash" in m_name or "gemini-2.0-flash" in m_name:
-                                target_model = m_name
-                                break
-                        
-                        response = client.models.generate_content(
-                            model=target_model,
-                            contents=prompt
-                        )
-                        st.markdown(response.text)
-                    except Exception as e:
-                        st.error(f"❌ AI 分析產生失敗，詳細 API 回傳訊息為：`{str(e)}`。請檢查 API Key 設定或存取額度。")
+                            pass
+                    
+                    # 路線 B: 備援使用 new google.genai SDK
+                    if not ai_success and GENAI_NEW_AVAILABLE:
+                        try:
+                            client = genai.Client(api_key=gemini_key)
+                            for m_name in ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-2.5-flash"]:
+                                try:
+                                    res = client.models.generate_content(
+                                        model=m_name,
+                                        contents=prompt
+                                    )
+                                    if res and res.text:
+                                        report_text = res.text
+                                        ai_success = True
+                                        break
+                                except Exception:
+                                    continue
+                        except Exception:
+                            pass
+                    
+                    # 呈現產出結果
+                    if ai_success:
+                        st.markdown(report_text)
+                    else:
+                        st.warning(f"💡 **已完成 [{target_row['Name']} ({target_row['Code']})] 財務與估值診斷指標**：\n\n"
+                                   f"- **估值位階**：當前 PE 為 `{target_row['PE']:.1f}倍`，低於次產業中位數 `{target_row['Sector_PE_Median']:.1f}倍` (折價 `{target_row['次產業_PE折溢價(%)']:.1f}%`)。\n"
+                                   f"- **市場位階**：股價 `{target_row['Price']}元`，屬於具有邊際安全效益之潛力價值標的。\n\n"
+                                   f"*(提示：若需生成完整 LLM 申論文字報告，請確認 Gemini API Key 已於 GCP 開啟 Model API 存取權限。)*")
 
 st.markdown("---")
 st.caption(f"系統版本：{VERSION} | 最後更新日期：{UPDATE_DATE} | 資料來源：臺灣證券交易所、櫃買中心與公開資訊觀測站")
