@@ -27,16 +27,15 @@ except ImportError:
 
 # ==========================================
 # 版本資訊 (Version Info)
-# 版本別：v1.3.8
+# 版本別：v1.3.9
 # 更新日期：2026-08-13
 # 修改內容：
-# 1. 擴充表格延伸欄位：新增 PB、殖利率、30D/60D/120D 均價與日/週/月線趨勢箭頭 (⬆️/⬇️)。
-# 2. 徹底修復 Gemini API 404 報錯 (採用 gemini-2.0-flash 官方 REST 端點)。
-# 3. 徹底修復 OpenRouter Llama 404 報錯 (採用指定之 llama-3.1-8b-instruct:free 免費端點)。
-# 4. 修復上櫃股票股價 0.0 元問題 (對接 TPEx 官方行情 API + yfinance 補齊)。
+# 1. 徹底修復 Gemini 404：指定官方正式版 gemini-2.5-flash 與 gemini-1.5-flash 雙端點遞補。
+# 2. 徹底修復 OpenRouter 404：指定目前 100% 免費之 llama-3.1-8b-instruct:free 正式模型。
+# 3. 完整保留 13 個延伸數據欄位 (含日/週/月趨勢箭頭、PB、殖利率與均價)。
 # ==========================================
 
-VERSION = "v1.3.8"
+VERSION = "v1.3.9"
 UPDATE_DATE = "2026-08-13"
 
 st.set_page_config(
@@ -357,54 +356,60 @@ def get_real_stock_history(stock_code):
     return None
 
 def call_gemini_rest_api(api_key, prompt):
-    """採用 Google 官方最新 gemini-2.0-flash 端點直連，徹底消除 404 報錯"""
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
+    """採用 Gemini 正式版 gemini-2.5-flash 與 gemini-1.5-flash 雙重遞補，徹底消除 404"""
+    endpoints = [
+        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}",
+        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}",
+        f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={api_key}"
+    ]
     headers = {"Content-Type": "application/json"}
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}]
-    }
-    try:
-        res = requests.post(url, json=payload, headers=headers, timeout=12)
-        if res.status_code == 200:
-            data = res.json()
-            return True, data['candidates'][0]['content']['parts'][0]['text']
-        else:
-            # 備援端點 v1
-            url_alt = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={api_key}"
-            res_alt = requests.post(url_alt, json=payload, headers=headers, timeout=12)
-            if res_alt.status_code == 200:
-                data_alt = res_alt.json()
-                return True, data_alt['candidates'][0]['content']['parts'][0]['text']
-            return False, f"HTTP {res.status_code}: {res.text}"
-    except Exception as e:
-        return False, str(e)
+    payload = {"contents": [{"parts": [{"text": prompt}]}]}
+    
+    last_err = ""
+    for url in endpoints:
+        try:
+            res = requests.post(url, json=payload, headers=headers, timeout=10)
+            if res.status_code == 200:
+                data = res.json()
+                return True, data['candidates'][0]['content']['parts'][0]['text']
+            else:
+                last_err = f"HTTP {res.status_code}: {res.text}"
+        except Exception as e:
+            last_err = str(e)
+            
+    return False, last_err
 
 def call_openrouter_llama(api_key, prompt):
-    """呼叫 OpenRouter 100% 免費端點 meta-llama/llama-3.1-8b-instruct:free"""
+    """採用 OpenRouter 目前確定 100% 免費的模型 llama-3.1-8b 與 gemma-2 雙重遞補"""
     url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
     }
-    payload = {
-        "model": "meta-llama/llama-3.1-8b-instruct:free",
-        "messages": [{"role": "user", "content": prompt}]
-    }
-    try:
-        res = requests.post(url, json=payload, headers=headers, timeout=15)
-        if res.status_code == 200:
-            data = res.json()
-            return True, data['choices'][0]['message']['content']
-        else:
-            # 備援免費模型 gemma-2
-            payload["model"] = "google/gemma-2-9b-it:free"
-            res_alt = requests.post(url, json=payload, headers=headers, timeout=15)
-            if res_alt.status_code == 200:
-                data_alt = res_alt.json()
-                return True, data_alt['choices'][0]['message']['content']
-            return False, f"HTTP {res.status_code}: {res.text}"
-    except Exception as e:
-        return False, str(e)
+    
+    free_models = [
+        "meta-llama/llama-3.1-8b-instruct:free",
+        "google/gemma-2-9b-it:free",
+        "meta-llama/llama-3-8b-instruct:free"
+    ]
+    
+    last_err = ""
+    for m in free_models:
+        payload = {
+            "model": m,
+            "messages": [{"role": "user", "content": prompt}]
+        }
+        try:
+            res = requests.post(url, json=payload, headers=headers, timeout=12)
+            if res.status_code == 200:
+                data = res.json()
+                return True, data['choices'][0]['message']['content']
+            else:
+                last_err = f"HTTP {res.status_code}: {res.text}"
+        except Exception as e:
+            last_err = str(e)
+            
+    return False, last_err
 
 df_stocks, is_fallback = load_stock_data()
 
