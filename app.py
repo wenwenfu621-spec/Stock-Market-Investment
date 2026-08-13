@@ -14,13 +14,15 @@ except ImportError:
 
 # ==========================================
 # 版本資訊 (Version Info)
-# 版本別：v1.4.22
+# 版本別：v1.4.23
 # 更新日期：2026-08-13
 # 修改內容：
-# 1. 強化 Gemini API 容錯機制：加入多模型自動備援（若遇到 503 高負載會自動切換備用模型）。
+# 1. 恢復欄位顯示控制：新增欄位選取與排序功能。
+# 2. 強化資料同步穩定性：調高 API 逾時限制與錯誤處理。
+# 3. 繼承 v1.4.22 之 Gemini 模型自動備援與個股條件比對功能。
 # ==========================================
 
-VERSION = "v1.4.22"
+VERSION = "v1.4.23"
 UPDATE_DATE = "2026-08-13"
 
 st.set_page_config(
@@ -130,10 +132,11 @@ def load_stock_data():
     
     # 1. 抓取上市 (TWSE)
     try:
+        # 使用更寬鬆的逾時設定，提升穩定性
         url_pe = "https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL"
         url_price = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
-        r_pe = requests.get(url_pe, timeout=6)
-        r_pr = requests.get(url_price, timeout=6)
+        r_pe = requests.get(url_pe, timeout=15)
+        r_pr = requests.get(url_price, timeout=15)
         if r_pe.status_code == 200 and r_pr.status_code == 200:
             df_pe = pd.DataFrame(r_pe.json())
             df_pr = pd.DataFrame(r_pr.json())
@@ -166,7 +169,7 @@ def load_stock_data():
     # 2. 抓取上櫃 (TPEx)
     otc_prices = {}
     try:
-        r_quotes = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes", timeout=6)
+        r_quotes = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes", timeout=15)
         if r_quotes.status_code == 200:
             for q_row in r_quotes.json():
                 qc = str(q_row.get("SecuritiesCompanyCode", q_row.get("Code", ""))).strip()
@@ -177,7 +180,7 @@ def load_stock_data():
         pass
 
     try:
-        r_otc = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_peratio_analysis", timeout=6)
+        r_otc = requests.get("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_peratio_analysis", timeout=15)
         if r_otc.status_code == 200:
             for row in r_otc.json():
                 c_str = str(row.get("SecuritiesCompanyCode", row.get("Code", ""))).strip()
@@ -197,21 +200,6 @@ def load_stock_data():
                     })
     except Exception:
         pass
-
-    # 3. Fallback 機制
-    if len(all_stocks) < 10:
-        fallback_data = [
-            {"Code": "2330", "Name": "台積電", "Price": 965.0, "PE": 18.5, "PB": 4.5, "Yield": 2.1, "Market": "上市"},
-            {"Code": "2454", "Name": "聯發科", "Price": 1210.0, "PE": 15.2, "PB": 3.2, "Yield": 4.5, "Market": "上市"},
-            {"Code": "2317", "Name": "鴻海", "Price": 270.0, "PE": 19.2, "PB": 1.8, "Yield": 3.8, "Market": "上市"},
-            {"Code": "2308", "Name": "台達電", "Price": 395.0, "PE": 21.0, "PB": 3.5, "Yield": 2.8, "Market": "上市"},
-            {"Code": "2881", "Name": "富邦金", "Price": 92.0, "PE": 10.2, "PB": 1.2, "Yield": 5.2, "Market": "上市"},
-            {"Code": "2603", "Name": "長榮", "Price": 185.0, "PE": 5.2, "PB": 0.9, "Yield": 8.5, "Market": "上市"},
-            {"Code": "2609", "Name": "陽明", "Price": 72.0, "PE": 4.8, "PB": 0.7, "Yield": 9.1, "Market": "上市"},
-            {"Code": "2615", "Name": "萬海", "Price": 88.0, "PE": 5.5, "PB": 0.8, "Yield": 7.5, "Market": "上市"},
-            {"Code": "2641", "Name": "正德", "Price": 32.0, "PE": 12.0, "PB": 1.1, "Yield": 4.0, "Market": "上市"}
-        ]
-        all_stocks.extend(fallback_data)
 
     df = pd.DataFrame(all_stocks).drop_duplicates(subset=["Code"]).reset_index(drop=True)
     df["Industry"] = df.apply(lambda r: infer_industry(r["Code"], r["Name"]), axis=1)
@@ -271,7 +259,6 @@ def call_gemini_api(api_key, prompt):
             if res.status_code == 200:
                 return True, res.json()['candidates'][0]['content']['parts'][0]['text']
             elif res.status_code == 503:
-                # 伺服器高負載，嘗試下一個備用模型
                 continue
             else:
                 last_err = f"HTTP {res.status_code}: {res.text}"
@@ -299,7 +286,7 @@ def call_openrouter_llama(api_key, prompt):
     }
     
     try:
-        res = requests.post(url, json=payload, headers=headers, timeout=20)
+        res = requests.post(url, json={"contents": payload}, headers=headers, timeout=20)
         if res.status_code == 200:
             return True, res.json()['choices'][0]['message']['content']
         return False, f"Error {res.status_code}: {res.text}"
@@ -474,16 +461,24 @@ with tab1:
                     filtered_df.at[idx, "Monthly_Trend"] = h_info["Monthly_Trend"]
             
             all_optional_cols = {
-                "產業類別": "Industry_Tagged", "當前真實股價": "Price", "本益比(PE)": "PE",
+                "股票代號": "Code", "股票名稱": "Name", "產業類別": "Industry_Tagged", "當前真實股價": "Price", "本益比(PE)": "PE",
                 "股價淨值比(PB)": "PB", "殖利率(%)": "Yield", "次產業中位數PE": "Sector_PE_Median",
                 "次產業 PE 折溢價(%)": "次產業_PE折溢價(%)", "近 30 日均價": "MA30",
                 "近 60 日均價": "MA60", "近 120 日均價": "MA120", "日線趨勢": "Daily_Trend",
                 "週線趨勢": "Weekly_Trend", "月線趨勢": "Monthly_Trend"
             }
-            display_cols = ["Code", "Name"] + list(all_optional_cols.values())
-            rename_dict = {"Code": "股票代號", "Name": "股票名稱", **{v: k for k, v in all_optional_cols.items()}}
-            display_df = filtered_df[display_cols].rename(columns=rename_dict)
-            st.dataframe(display_df, use_container_width=True, hide_index=True)
+            
+            # --- 新增：欄位自訂選取 ---
+            selected_col_names = st.multiselect(
+                "請選擇顯示欄位 (拖曳順序可調整顯示順序)：",
+                options=list(all_optional_cols.keys()),
+                default=["股票代號", "股票名稱", "產業類別", "當前真實股價", "本益比(PE)", "股價淨值比(PB)", "殖利率(%)"]
+            )
+            
+            if selected_col_names:
+                mapped_cols = [all_optional_cols[name] for name in selected_col_names]
+                st.dataframe(filtered_df[mapped_cols].rename(columns={v: k for k, v in all_optional_cols.items()}), use_container_width=True, hide_index=True)
+            # ---------------------------
         else:
             st.warning("尚無符合當前條件的標的，請適度放寬側邊欄的篩選條件。")
 
