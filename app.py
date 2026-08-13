@@ -14,13 +14,13 @@ except ImportError:
 
 # ==========================================
 # 版本資訊 (Version Info)
-# 版本別：v1.4.18
+# 版本別：v1.4.19
 # 更新日期：2026-08-13
 # 修改內容：
-# 1. 修正 Gemini API 錯誤：使用 v1beta 端點搭配 gemini-3.5-flash 模型，解決舊模型下架之 404 錯誤。
+# 1. 修正 OpenRouter Llama 亂碼與退化迴圈問題：在 payload 加入 temperature=0.3、max_tokens 及繁體中文 system prompt 約束。
 # ==========================================
 
-VERSION = "v1.4.18"
+VERSION = "v1.4.19"
 UPDATE_DATE = "2026-08-13"
 
 st.set_page_config(
@@ -272,14 +272,22 @@ def call_gemini_api(api_key, prompt):
         return False, str(e)
 
 def call_openrouter_llama(api_key, prompt):
-    """動態爬取 OpenRouter"""
+    """動態爬取 OpenRouter，加入穩定參數與繁體中文系統提示詞避免生成亂碼迴圈"""
     clean_key = str(api_key).strip().strip('"').strip("'")
     if not clean_key: return False, "API Key 為空"
     
     target_model = "meta-llama/llama-3.1-8b-instruct"
     url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {"Authorization": f"Bearer {clean_key}", "Content-Type": "application/json"}
-    payload = {"model": target_model, "messages": [{"role": "user", "content": prompt}]}
+    payload = {
+        "model": target_model, 
+        "messages": [
+            {"role": "system", "content": "你是一個專業的繁體中文股市分析助理。請僅以流暢、清晰的繁體中文回答，嚴禁輸出無意義的亂碼、多國語言雜訊或程式碼片段。"},
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.3,
+        "max_tokens": 1000
+    }
     
     try:
         res = requests.post(url, json=payload, headers=headers, timeout=20)
