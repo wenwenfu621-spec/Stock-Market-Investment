@@ -14,14 +14,13 @@ except ImportError:
 
 # ==========================================
 # 版本資訊 (Version Info)
-# 版本別：v1.4.14
+# 版本別：v1.4.15
 # 更新日期：2026-08-13
 # 修改內容：
-# 1. 修正 Gemini 404 錯誤：將模型名稱由 gemini-1.5-flash 改為 gemini-pro，確保 API Key 環境相容性。
-# 2. 修正 OpenRouter Llama 404 錯誤：將 model slug 由 meta-llama/llama-3.1-8b-instruct:free 更新為 meta-llama/llama-3.1-8b-instruct。
+# 1. 修正 Gemini API 端點：將 URL 中的 v1beta 改為 v1，以相容 gemini-pro 模型。
 # ==========================================
 
-VERSION = "v1.4.14"
+VERSION = "v1.4.15"
 UPDATE_DATE = "2026-08-13"
 
 st.set_page_config(
@@ -258,11 +257,11 @@ def get_real_stock_history(stock_code):
     return None
 
 def call_gemini_api(api_key, prompt):
-    """純 REST API 呼叫，改用 gemini-pro 模型確保相容性"""
+    """純 REST API 呼叫，將端點從 v1beta 改為 v1 配合 gemini-pro"""
     clean_key = str(api_key).strip().strip('"').strip("'")
     if not clean_key: return False, "API Key 為空"
     
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={clean_key}"
+    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateContent?key={clean_key}"
     try:
         res = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=15)
         if res.status_code == 200:
@@ -273,7 +272,7 @@ def call_gemini_api(api_key, prompt):
         return False, str(e)
 
 def call_openrouter_llama(api_key, prompt):
-    """動態爬取 OpenRouter，更新 Llama 模型 slug"""
+    """動態爬取 OpenRouter"""
     clean_key = str(api_key).strip().strip('"').strip("'")
     if not clean_key: return False, "API Key 為空"
     
