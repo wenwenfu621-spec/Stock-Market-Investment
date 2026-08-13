@@ -14,14 +14,14 @@ except ImportError:
 
 # ==========================================
 # 版本資訊 (Version Info)
-# 版本別：v1.4.20
+# 版本別：v1.4.21
 # 更新日期：2026-08-13
 # 修改內容：
-# 1. 修正 Gemini API 逾時：將 timeout 調高至 60 秒。
-# 2. 恢復介面說明：為側邊欄所有篩選條件加入 help 數值解釋說明。
+# 1. 新增單一個股篩選條件比對功能：查詢個股時會自動顯示該標的是否符合側邊欄的各項篩選設定。
+# 2. 繼承 v1.4.20 之所有修正（Gemini 逾時設定、參數說明文字）。
 # ==========================================
 
-VERSION = "v1.4.20"
+VERSION = "v1.4.21"
 UPDATE_DATE = "2026-08-13"
 
 st.set_page_config(
@@ -416,6 +416,27 @@ with tab1:
             p3.metric("近 30 日最低價", f"{stock_data.get('Low_30D', 0):.1f} 元")
             p4.metric("近 60 日最高價", f"{stock_data.get('High_60D', 0):.1f} 元")
             p5.metric("近 60 日最低價", f"{stock_data.get('Low_60D', 0):.1f} 元")
+            
+            # --- 新增：篩選條件比對功能 ---
+            st.markdown("---")
+            st.markdown("#### ⚖️ 篩選條件相容性比對")
+            checks = [
+                {"name": "產業符合", "passed": (selected_industry == "全部產業" or stock_data['Industry'] == selected_industry), "detail": f"條件: {selected_industry} / 個股: {stock_data['Industry']}"},
+                {"name": "PE 折溢價率", "passed": (stock_data["次產業_PE折溢價(%)"] <= pe_discount_threshold), "detail": f"門檻: <= {pe_discount_threshold}% / 實際: {stock_data['次產業_PE折溢價(%)']:.1f}%"},
+                {"name": "次產業 PE 中位數", "passed": (stock_data["Sector_PE_Median"] <= max_sector_pe), "detail": f"門檻: <= {max_sector_pe}倍 / 實際: {stock_data['Sector_PE_Median']:.1f}倍"},
+                {"name": "個股 PE 絕對值", "passed": (stock_data["PE"] <= max_stock_pe), "detail": f"門檻: <= {max_stock_pe}倍 / 實際: {stock_data['PE']:.1f}倍"}
+            ]
+            
+            cols = st.columns(4)
+            for i, check in enumerate(checks):
+                with cols[i]:
+                    if check["passed"]:
+                        st.success(f"✅ {check['name']}")
+                    else:
+                        st.error(f"❌ {check['name']}")
+                    st.caption(check["detail"])
+            # ---------------------------
+
         st.markdown("---")
 
     col1, col2, col3 = st.columns(3)
