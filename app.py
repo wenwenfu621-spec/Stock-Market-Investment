@@ -21,14 +21,14 @@ except ImportError:
 
 # ==========================================
 # 版本資訊 (Version Info)
-# 版本別：v1.4.4
+# 版本別：v1.4.5
 # 更新日期：2026-08-13
 # 修改內容：
-# 1. 徹底修復 Gemini 404：優先透過官方 SDK 進行路由，並將 REST 端點修正為穩定支援的 v1/models/gemini-1.5-flash。
+# 1. 徹底修復 Gemini 404：將 REST 端點統一校正回支援 gemini-1.5-flash 的 v1beta 版本。
 # 2. 完全保留已成功運作的 OpenRouter 動態免費模型抓取機制與 13 個延伸數據欄位。
 # ==========================================
 
-VERSION = "v1.4.4"
+VERSION = "v1.4.5"
 UPDATE_DATE = "2026-08-13"
 
 st.set_page_config(
@@ -337,7 +337,7 @@ def get_real_stock_history(stock_code):
     return None
 
 def call_gemini_api(api_key, prompt):
-    """徹底修復 Gemini 404：優先透過官方 SDK 路由，並備援 v1 端點"""
+    """徹底修復 Gemini 404：優先透過官方 SDK 路由，並將 REST 備援端點校正為正確的 v1beta 版本"""
     clean_key = str(api_key).strip().strip('"').strip("'")
     if not clean_key:
         return False, "GEMINI_API_KEY 為空，請檢查 Secrets 設定。"
@@ -357,8 +357,8 @@ def call_gemini_api(api_key, prompt):
         except Exception:
             pass
 
-    # 2. 備援使用標準 REST API v1 端點
-    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={clean_key}"
+    # 2. 備援使用標準 REST API v1beta 端點 (修正 v1 404 問題)
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={clean_key}"
     headers = {"Content-Type": "application/json"}
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
     
