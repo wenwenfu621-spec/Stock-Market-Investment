@@ -21,14 +21,14 @@ except ImportError:
 
 # ==========================================
 # 版本資訊 (Version Info)
-# 版本別：v1.4.5
+# 版本別：v1.4.6
 # 更新日期：2026-08-13
 # 修改內容：
-# 1. 徹底修復 Gemini 404：將 REST 端點統一校正回支援 gemini-1.5-flash 的 v1beta 版本。
+# 1. 徹底解決 Gemini 404：全面更新模型清單，優先採用 gemini-2.5-flash 與 gemini-1.5-flash 雙軌輪詢。
 # 2. 完全保留已成功運作的 OpenRouter 動態免費模型抓取機制與 13 個延伸數據欄位。
 # ==========================================
 
-VERSION = "v1.4.5"
+VERSION = "v1.4.6"
 UPDATE_DATE = "2026-08-13"
 
 st.set_page_config(
@@ -230,7 +230,7 @@ def load_stock_data():
             name_col = "CompanyName" if "CompanyName" in df_otc.columns else "Name"
             pe_col = "PriceEarningRatio" if "PriceEarningRatio" in df_otc.columns else "PEratio"
             pb_col = "PriceBookRatio" if "PriceBookRatio" in df_otc.columns else "PBratio"
-            yd_col = "YieldRatio" if "YieldRatio" in df_otc.columns else "DividendYield"
+            yd_col = "YieldRatio" if "YieldRatio" in df_otc.columns else "YieldRatio"
             
             for _, row in df_otc.iterrows():
                 c_str = str(row.get(code_col, "")).strip()
@@ -337,16 +337,16 @@ def get_real_stock_history(stock_code):
     return None
 
 def call_gemini_api(api_key, prompt):
-    """徹底修復 Gemini 404：優先透過官方 SDK 路由，並將 REST 備援端點校正為正確的 v1beta 版本"""
+    """徹底修復 Gemini 404：優先使用 gemini-2.5-flash 與 gemini-1.5-flash 雙軌 REST 與 SDK 輪詢"""
     clean_key = str(api_key).strip().strip('"').strip("'")
     if not clean_key:
         return False, "GEMINI_API_KEY 為空，請檢查 Secrets 設定。"
 
-    # 1. 優先透過官方 google-generativeai SDK
+    # 1. 優先透過官方 SDK 進行多模型嘗試
     if GENAI_LEGACY_AVAILABLE:
         try:
             genai_legacy.configure(api_key=clean_key)
-            for m_name in ['gemini-1.5-flash', 'gemini-1.5-pro']:
+            for m_name in ['gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-1.5-pro']:
                 try:
                     m = genai_legacy.GenerativeModel(m_name)
                     res = m.generate_content(prompt)
@@ -357,21 +357,26 @@ def call_gemini_api(api_key, prompt):
         except Exception:
             pass
 
-    # 2. 備援使用標準 REST API v1beta 端點 (修正 v1 404 問題)
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={clean_key}"
+    # 2. REST API 雙軌輪詢：gemini-2.5-flash 與 gemini-1.5-flash
     headers = {"Content-Type": "application/json"}
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
     
-    try:
-        res = requests.post(url, json=payload, headers=headers, timeout=15)
-        if res.status_code == 200:
-            data = res.json()
-            text = data.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '')
-            if text:
-                return True, text
-        return False, f"HTTP {res.status_code}: {res.text}"
-    except Exception as e:
-        return False, f"Gemini 連線失敗: {str(e)}"
+    last_err = ""
+    for model_name in ['gemini-2.5-flash', 'gemini-1.5-flash']:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={clean_key}"
+        try:
+            res = requests.post(url, json=payload, headers=headers, timeout=15)
+            if res.status_code == 200:
+                data = res.json()
+                text = data.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '')
+                if text:
+                    return True, text
+            else:
+                last_err = f"HTTP {res.status_code}: {res.text}"
+        except Exception as e:
+            last_err = str(e)
+            
+    return False, f"Gemini 連線失敗: {last_err}"
 
 def call_openrouter_llama(api_key, prompt):
     """動態爬取 OpenRouter 當下存活的免費模型 ID（已驗證成功）"""
