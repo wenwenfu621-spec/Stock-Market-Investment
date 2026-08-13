@@ -3,20 +3,27 @@ import pandas as pd
 import requests
 import os
 import base64
-import yfinance as yf
 from google import genai
+
+# 安全載入 yfinance (防止因伺服器未及時安裝套件而導致 ModuleNotFoundError 崩潰)
+try:
+    import yfinance as yf
+    YFINANCE_AVAILABLE = True
+except ImportError:
+    yf = None
+    YFINANCE_AVAILABLE = False
 
 # ==========================================
 # 版本資訊 (Version Info)
-# 版本別：v1.3.0
+# 版本別：v1.3.1
 # 更新日期：2026-08-13
 # 修改內容：
-# 1. 修復 Gemini AI 404 模型報錯（更新為 gemini-1.5-flash / gemini-2.0-flash）。
-# 2. 單股查詢欄位預設不保留記憶（開新分頁自動歸零）；左側參數與欄位順序完整保留。
-# 3. 採用方案 A 對接 TWSE 官方真實收盤價 API (STOCK_DAY_ALL) 與 yfinance 真實 30/60 日高低價。
+# 1. 修正 yfinance 匯入防護機制，解決 ModuleNotFoundError 導致的畫面崩潰。
+# 2. 提供配套 requirements.txt 確保 Streamlit Cloud 伺服器環境正確安裝。
+# 3. 完整保留 v1.3.0 之 Gemini AI 模型修復、真實股價對接與狀態記憶邏輯。
 # ==========================================
 
-VERSION = "v1.3.0"
+VERSION = "v1.3.1"
 UPDATE_DATE = "2026-08-13"
 
 st.set_page_config(
@@ -216,9 +223,11 @@ def load_stock_data():
     df["Low_60D"] = None
     return df, True
 
-# 動態使用 yfinance 抓取單股真實近 30/60 日歷史 K 線高低價
+# 動態抓取單股真實近 30/60 日歷史 K 線高低價 (含 yfinance 載入防護)
 @st.cache_data(ttl=1800)
 def get_real_stock_history(stock_code):
+    if not YFINANCE_AVAILABLE:
+        return None
     try:
         ticker = f"{stock_code}.TW"
         df_hist = yf.Ticker(ticker).history(period="3mo")
