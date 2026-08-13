@@ -14,15 +14,14 @@ except ImportError:
 
 # ==========================================
 # 版本資訊 (Version Info)
-# 版本別：v1.4.23
+# 版本別：v1.4.24
 # 更新日期：2026-08-13
 # 修改內容：
-# 1. 恢復欄位顯示控制：新增欄位選取與排序功能。
-# 2. 強化資料同步穩定性：調高 API 逾時限制與錯誤處理。
-# 3. 繼承 v1.4.22 之 Gemini 模型自動備援與個股條件比對功能。
+# 1. 整合全新右下角個人專屬署名注入函數 (inject_custom_footer)：支援多格式 Q 版頭像與獨立浮動 CSS 徽章。
+# 2. 繼承 v1.4.23 之所有核心功能（欄位選取排序、Gemini 多模型備援、單個股條件比對）。
 # ==========================================
 
-VERSION = "v1.4.23"
+VERSION = "v1.4.24"
 UPDATE_DATE = "2026-08-13"
 
 st.set_page_config(
@@ -31,53 +30,62 @@ st.set_page_config(
     layout="wide"
 )
 
-# 讀取 Avatar
-def get_avatar_base64():
-    avatar_path = "Avatar.png"
-    if os.path.exists(avatar_path):
-        try:
-            with open(avatar_path, "rb") as f:
-                data = f.read()
-            return f"data:image/png;base64,{base64.b64encode(data).decode()}"
-        except Exception:
-            return None
-    return None
-
-avatar_b64 = get_avatar_base64()
-avatar_html = f'<img src="{avatar_b64}" style="width: 28px; height: 28px; border-radius: 50%; object-fit: cover;">' if avatar_b64 else '<span style="font-size: 20px;">🧔🏻‍♂️</span>'
-
-st.markdown(f"""
-<style>
-.floating-card {{
-    position: fixed;
-    bottom: 18px;
-    right: 150px;
-    background-color: #ffffff;
-    padding: 6px 16px;
-    border-radius: 25px;
-    box-shadow: 0px 4px 12px rgba(0, 0, 0, 0.15);
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    z-index: 99999;
-    border: 1px solid #e0e0e0;
-}}
-.floating-card span.designer-title {{
-    font-family: 'Brush Script MT', 'Caveat', 'Comic Sans MS', cursive, serif;
-    font-style: italic;
-    font-weight: bold;
-    font-size: 18px;
-    color: #222222;
-}}
-</style>
-<div class="floating-card">
-    {avatar_html}
-    <span class="designer-title">Design by Max</span>
-</div>
-""", unsafe_allow_html=True)
-
 st.title("📈 台股價值與潛力股智慧分析系統")
 st.caption(f"📌 版本別：{VERSION} | 🗓️ 更新日期：{UPDATE_DATE} | 結合官方 OpenAPI、真實市場 K 線資料與 Gemini + Meta Llama 雙 AI 的同業估值診斷平台")
+
+# ==========================================
+# 右下角個人專屬署名注入函數
+# ==========================================
+def inject_custom_footer():
+    avatar_candidates = ["avatar.jpg", "avatar.jpeg", "avatar.png", "avatar.JPG", "Avatar.png"]
+    img_base64 = ""
+    mime_type = "image/png"
+    for af in avatar_candidates:
+        if os.path.exists(af):
+            with open(af, "rb") as img_f:
+                img_base64 = base64.b64encode(img_f.read()).decode("utf-8")
+                if af.lower().endswith((".jpg", ".jpeg")):
+                    mime_type = "image/jpeg"
+                else:
+                    mime_type = "image/png"
+            break
+            
+    avatar_html = (
+        f'<img src="data:{mime_type};base64,{img_base64}" style="width: 36px; height: 36px; border-radius: 50%; object-fit: cover; margin-right: 8px; border: 1.5px solid #ccc; background-color: #fff;">'
+        if img_base64
+        else ""
+    )
+    
+    footer_css = f"""
+    <style>
+    .custom-footer-max {{
+        position: fixed;
+        bottom: 16px;
+        right: 210px;
+        display: flex;
+        align-items: center;
+        background-color: rgba(255, 255, 255, 0.95);
+        padding: 4px 12px;
+        border-radius: 20px;
+        box-shadow: 0px 2px 8px rgba(0, 0, 0, 0.15);
+        z-index: 999999;
+        pointer-events: none;
+    }}
+    .custom-footer-text {{
+        font-family: 'Comic Sans MS', cursive, sans-serif;
+        font-weight: bold;
+        font-style: italic;
+        font-size: 0.95rem;
+        color: #333333;
+        white-space: nowrap;
+    }}
+    </style>
+    <div class="custom-footer-max">
+        {avatar_html}
+        <span class="custom-footer-text">Design by Max</span>
+    </div>
+    """
+    st.markdown(footer_css, unsafe_allow_html=True)
 
 # ==========================================
 # 台股官方 33 大產業字典與色彩歸類對照表
@@ -132,7 +140,6 @@ def load_stock_data():
     
     # 1. 抓取上市 (TWSE)
     try:
-        # 使用更寬鬆的逾時設定，提升穩定性
         url_pe = "https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL"
         url_price = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
         r_pe = requests.get(url_pe, timeout=15)
@@ -286,7 +293,7 @@ def call_openrouter_llama(api_key, prompt):
     }
     
     try:
-        res = requests.post(url, json={"contents": payload}, headers=headers, timeout=20)
+        res = requests.post(url, json=payload, headers=headers, timeout=20)
         if res.status_code == 200:
             return True, res.json()['choices'][0]['message']['content']
         return False, f"Error {res.status_code}: {res.text}"
@@ -468,7 +475,7 @@ with tab1:
                 "週線趨勢": "Weekly_Trend", "月線趨勢": "Monthly_Trend"
             }
             
-            # --- 新增：欄位自訂選取 ---
+            # --- 欄位自訂選取 ---
             selected_col_names = st.multiselect(
                 "請選擇顯示欄位 (拖曳順序可調整顯示順序)：",
                 options=list(all_optional_cols.keys()),
@@ -556,3 +563,6 @@ with tab3:
 
 st.markdown("---")
 st.caption(f"系統版本：{VERSION} | 最後更新日期：{UPDATE_DATE} | 資料來源：臺灣證券交易所、櫃買中心與公開資訊觀測站")
+
+# 呼叫頁面底部個人專屬署名
+inject_custom_footer()
