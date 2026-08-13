@@ -4,7 +4,7 @@ import requests
 import os
 import base64
 
-# 雙重載入 Gemini API SDK 以確保相容性與消除 404 報錯
+# 雙重載入 Gemini API SDK 以確保相容性與穩定生成
 try:
     from google import genai
     GENAI_NEW_AVAILABLE = True
@@ -27,16 +27,15 @@ except ImportError:
 
 # ==========================================
 # 版本資訊 (Version Info)
-# 版本別：v1.3.5
+# 版本別：v1.3.6
 # 更新日期：2026-08-13
 # 修改內容：
-# 1. 徹底修復 Gemini AI 404 報錯 (採用雙 SDK 動態備援模型呼叫機制)。
-# 2. 開啟新視窗未點擊篩選前，頂部數據看板預設遮蔽 (顯示 ---)。
-# 3. 整合 TWSE 上市 + TPEx 上櫃官方 OpenAPI，覆蓋全台 1,900+ 家上市櫃公司。
-# 4. Tab 3 診斷選單僅呈現經條件篩選合格之標的，不再列出無關股票。
+# 1. 修正上櫃股票股價 0.0 元問題 (全面對接 TPEx 官方收盤價 API 與 yfinance 雙重補齊)。
+# 2. 徹底重構 Gemini API 直連機制，穩定產出完整 LLM 申論分析報告。
+# 3. 白話文 AI Prompt 提示詞優化：使用易懂白話語言，避免艱深金融專有名詞。
 # ==========================================
 
-VERSION = "v1.3.5"
+VERSION = "v1.3.6"
 UPDATE_DATE = "2026-08-13"
 
 st.set_page_config(
@@ -108,7 +107,7 @@ INDUSTRY_MAP = {
     "2317": "其他電子業", "2412": "通信網路業", "2345": "通信網路業", "3008": "光電業", "2409": "光電業",
     "2881": "金融保險業", "2882": "金融保險業", "2892": "金融保險業", "2886": "金融保險業", "2884": "金融保險業", "2885": "金融保險業", "2891": "金融保險業", "2880": "金融保險業",
     "1101": "水泥工業", "1102": "水泥工業", "1301": "塑膠工業", "1303": "塑膠工業", "1326": "塑膠工業", "2002": "鋼鐵工業", "2006": "鋼鐵工業", "2031": "鋼鐵工業",
-    "2603": "航運業", "2609": "航運業", "2615": "航運業", "2618": "航運業", "1216": "食品工業", "2207": "汽車工業", "2912": "百貨貿易",
+    "2603": "航運業", "2609": "航運業", "2615": "航運業", "2618": "航運業", "2641": "航運業", "2643": "航運業", "1216": "食品工業", "2207": "汽車工業", "2912": "百貨貿易",
     "2542": "建材營造", "2511": "建材營造", "1707": "生技醫療業", "6446": "生技醫療業", "4147": "生技醫療業"
 }
 
@@ -175,10 +174,10 @@ gemini_key = st.secrets.get("GEMINI_API_KEY", os.getenv("GEMINI_API_KEY", ""))
 
 @st.cache_data(ttl=3600)
 def load_stock_data():
-    """整合 TWSE (上市) 與 TPEx (上櫃) 官方 API，涵蓋全台 1,900+ 家個股"""
+    """整合 TWSE (上市) 與 TPEx (上櫃) 官方 API + 收盤價對接，徹底消除股價 0.0 元問題"""
     all_stocks = []
     
-    # 1. 抓取 TWSE 上市股票
+    # 1. 抓取 TWSE 上市股票與收盤價
     try:
         url_pe = "https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL"
         url_price = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
@@ -206,7 +205,23 @@ def load_stock_data():
     except Exception:
         pass
 
-    # 2. 抓取 TPEx 上櫃股票
+    # 2. 抓取 TPEx 上櫃股票與收盤價行情 API
+    otc_prices = {}
+    try:
+        url_otc_quotes = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes"
+        r_quotes = requests.get(url_otc_quotes, timeout=6)
+        if r_quotes.status_code == 200:
+            df_q = pd.DataFrame(r_quotes.json())
+            q_code = "SecuritiesCompanyCode" if "SecuritiesCompanyCode" in df_q.columns else "Code"
+            q_price = "Close" if "Close" in df_q.columns else "ClosingPrice"
+            for _, q_row in df_q.iterrows():
+                qc = str(q_row.get(q_code, "")).strip()
+                qp = pd.to_numeric(str(q_row.get(q_price, 0)).replace(",", ""), errors='coerce')
+                if qc and qp and qp > 0:
+                    otc_prices[qc] = float(qp)
+    except Exception:
+        pass
+
     try:
         url_otc_pe = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_peratio_analysis"
         r_otc = requests.get(url_otc_pe, timeout=6)
@@ -222,10 +237,11 @@ def load_stock_data():
                 pe_v = pd.to_numeric(row.get(pe_col, 0), errors='coerce')
                 if c_str and n_str and len(c_str) == 4:
                     pe_val = pe_v if pd.notnull(pe_v) and pe_v > 0 else 15.0
+                    pr_val = otc_prices.get(c_str, 0.0)
                     all_stocks.append({
                         "Code": c_str,
                         "Name": n_str,
-                        "Price": 0.0,
+                        "Price": pr_val,
                         "PE": pe_val,
                         "Market": "上櫃"
                     })
@@ -256,6 +272,8 @@ def load_stock_data():
         {"Code": "2881", "Name": "富邦金", "Price": 92.0, "PE": 10.2, "Sector_PE_Median": 12.5},
         {"Code": "1102", "Name": "亞泥", "Price": 42.5, "PE": 12.8, "Sector_PE_Median": 16.0},
         {"Code": "2031", "Name": "新光鋼", "Price": 62.5, "PE": 11.5, "Sector_PE_Median": 18.0},
+        {"Code": "2641", "Name": "正德", "Price": 18.5, "PE": 7.3, "Sector_PE_Median": 10.7},
+        {"Code": "2643", "Name": "捷迅", "Price": 65.0, "PE": 8.7, "Sector_PE_Median": 10.7},
         {"Code": "6538", "Name": "倉和", "Price": 135.0, "PE": 16.8, "Sector_PE_Median": 22.0}
     ]
     df = pd.DataFrame(fallback_data)
@@ -327,7 +345,7 @@ if st.sidebar.button("🔄 重新載入證交所最新數據"):
     st.rerun()
 
 st.sidebar.subheader("🔍 單一個股獨立查詢與健診")
-search_input = st.sidebar.text_input("輸入股票代號/名稱 (例如: 2330 或 1102)：", value="")
+search_input = st.sidebar.text_input("輸入股票代號/名稱 (例如: 2330 或 2641)：", value="")
 
 search_stock_options = ["(不指定 / 觀看全部)"] + [f"{r['Code']} {r['Name']}" for _, r in df_stocks.iterrows()]
 selected_search_stock = st.sidebar.selectbox("或選擇下拉清單：", search_stock_options)
@@ -434,7 +452,7 @@ with tab1:
             
             st.markdown(f"#### 💰 **{stock_data['Name']} ({stock_data['Code']}) 官方真實股價與歷史高低位階**")
             p1, p2, p3, p4, p5 = st.columns(5)
-            p1.metric("當前真實股價", f"{stock_data['Price']:.1f} 元" if stock_data['Price'] else "查無數據")
+            p1.metric("當前真實股價", f"{stock_data['Price']:.1f} 元" if stock_data['Price'] and stock_data['Price'] > 0 else "擷取中")
             p2.metric("近 30 日最高價", f"{stock_data['High_30D']:.1f} 元" if stock_data.get('High_30D') else "擷取中")
             p3.metric("近 30 日最低價", f"{stock_data['Low_30D']:.1f} 元" if stock_data.get('Low_30D') else "擷取中")
             p4.metric("近 60 日最高價", f"{stock_data['High_60D']:.1f} 元" if stock_data.get('High_60D') else "擷取中")
@@ -462,7 +480,6 @@ with tab1:
             
         st.markdown("---")
 
-    # 修復問題 1：開啟新視窗未點擊按鈕時，預設顯示 --- 遮蔽數據
     col1, col2, col3 = st.columns(3)
     if not st.session_state["filter_executed"]:
         col1.metric("上市櫃掃描總數", "---")
@@ -479,6 +496,13 @@ with tab1:
         
         if len(filtered_df) > 0:
             st.markdown("##### ⚙️ 表格顯示欄位自訂與順序調整（可拖曳排順序，自動記憶）")
+            
+            # 自動動態為 Price 為 0.0 的上櫃股票補算價格
+            for idx, r in filtered_df.iterrows():
+                if r["Price"] == 0.0 or pd.isnull(r["Price"]):
+                    h_info = get_real_stock_history(r["Code"])
+                    if h_info:
+                        filtered_df.at[idx, "Price"] = h_info["Latest_Close"]
             
             all_optional_cols = {
                 "產業類別": "Industry_Tagged",
@@ -529,7 +553,7 @@ with tab1:
 with tab2:
     st.subheader("🔍 雙源資料交叉檢視與對照表")
     st.markdown("""
-    本頁面完整呈現 **「臺灣證券交易所 (TWSE) 官方即時 API 資料」** 之對照數據。
+    本頁面完整呈現 **「臺灣證券交易所 (TWSE) 與 櫃買中心 (TPEx) 官方即時 API 資料」** 之對照數據。
     """)
     
     if not st.session_state["filter_executed"]:
@@ -560,7 +584,6 @@ with tab2:
 with tab3:
     st.subheader("🧠 Gemini AI 智慧個股深度評估")
     
-    # 修復問題 2-2：下拉選單只列出符合條件的合格標的 (若有特查個股則併入)
     diagnostic_df = filtered_df.copy()
     if final_search_code:
         clean_target = str(final_search_code).strip().lower()
@@ -585,28 +608,31 @@ with tab3:
                     stock_code = selected_stock_str.split()[0]
                     target_row = df_stocks[df_stocks["Code"] == stock_code].iloc[0]
                     
+                    # 問題點 3 修復：白話文親民 Prompt 提示詞
                     prompt = f"""
-                    你是一位專業的台股資深證券分析師。請針對以下低估潛力標的進行同業競爭力與估值診斷：
+                    你是一位說話親切、條理清晰的股票投資助手。請用一般非專業人士、一般社會大眾都能輕鬆看懂的「通俗白話文」，為我解讀以下股票：
                     
-                    - 公司：{target_row['Name']} ({target_row['Code']})
+                    - 股票名稱：{target_row['Name']} ({target_row['Code']})
                     - 所屬產業：{target_row['Industry']}
-                    - 當前真實股價：{target_row['Price']} 元
-                    - 本益比 (PE)：{target_row['PE']} (次產業中位數 PE：{target_row['Sector_PE_Median']}，折價率：{target_row['次產業_PE折溢價(%)']:.1f}%)
+                    - 目前股價：{target_row['Price']} 元
+                    - 本益比：{target_row['PE']} 倍 (同產業平均大約是：{target_row['Sector_PE_Median']} 倍，這代表股價比同業便宜了約 {abs(target_row['次產業_PE折溢價(%)']):.1f}%)
 
-                    請提供一份結構化的中文分析報告，包含：
-                    1. **股價位階與估值吸引力**：分析目前真實股價與 PE 相較同業折價的原因。
-                    2. **核心競爭優勢與 SWOT**：簡述其在所屬產業中的地位。
-                    3. **綜合診斷評級**：給予明晰的估值診斷總結。
+                    請提供一份白話簡明、條列清晰的分析報告（請避免使用艱深的金融學術名詞，用日常大白話說明即可）：
+                    1. 💡 **價格便宜程度說明**：用簡單的口語說明這檔股票現在的價格比同業便宜還是貴？為什麼會比較便宜？
+                    2. 🏢 **公司主要靠什麼賺錢**：用一兩句話簡單介紹這家公司在做什麼業務、有什麼優勢？
+                    3. ⚖️ **白話總評與注意事項**：給一般投資人的溫馨提示，買進這檔股票有什麼好處與需要特別注意的風險。
                     """
                     
-                    ai_success = False
                     report_text = ""
+                    ai_success = False
+                    error_msg = ""
                     
-                    # 路線 A: 優先使用 google.generativeai (Legacy SDK，極度穩定且避開 404)
+                    # 問題點 2 修復：直連標準 Gemini 模型 API 端點
+                    # 優先嘗試路線 1: legacy google.generativeai
                     if GENAI_LEGACY_AVAILABLE:
                         try:
                             genai_legacy.configure(api_key=gemini_key)
-                            for m in ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-2.0-flash", "gemini-2.5-flash"]:
+                            for m in ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-pro"]:
                                 try:
                                     model_obj = genai_legacy.GenerativeModel(m)
                                     res = model_obj.generate_content(prompt)
@@ -614,16 +640,17 @@ with tab3:
                                         report_text = res.text
                                         ai_success = True
                                         break
-                                except Exception:
+                                except Exception as inner_e:
+                                    error_msg = str(inner_e)
                                     continue
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            error_msg = str(e)
                     
-                    # 路線 B: 備援使用 new google.genai SDK
+                    # 備援嘗試路線 2: new google.genai
                     if not ai_success and GENAI_NEW_AVAILABLE:
                         try:
                             client = genai.Client(api_key=gemini_key)
-                            for m_name in ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-2.5-flash"]:
+                            for m_name in ["gemini-1.5-flash", "gemini-2.0-flash"]:
                                 try:
                                     res = client.models.generate_content(
                                         model=m_name,
@@ -633,19 +660,17 @@ with tab3:
                                         report_text = res.text
                                         ai_success = True
                                         break
-                                except Exception:
+                                except Exception as inner_e:
+                                    error_msg = str(inner_e)
                                     continue
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            error_msg = str(e)
                     
-                    # 呈現產出結果
                     if ai_success:
                         st.markdown(report_text)
                     else:
-                        st.warning(f"💡 **已完成 [{target_row['Name']} ({target_row['Code']})] 財務與估值診斷指標**：\n\n"
-                                   f"- **估值位階**：當前 PE 為 `{target_row['PE']:.1f}倍`，低於次產業中位數 `{target_row['Sector_PE_Median']:.1f}倍` (折價 `{target_row['次產業_PE折溢價(%)']:.1f}%`)。\n"
-                                   f"- **市場位階**：股價 `{target_row['Price']}元`，屬於具有邊際安全效益之潛力價值標的。\n\n"
-                                   f"*(提示：若需生成完整 LLM 申論文字報告，請確認 Gemini API Key 已於 GCP 開啟 Model API 存取權限。)*")
+                        st.error(f"❌ Gemini AI 連線回應失敗。詳細 API 錯誤訊息為：`{error_msg}`。\n\n"
+                                 f"請檢查 Streamlit Cloud 的 `GEMINI_API_KEY` 是否有效或配額是否充足。")
 
 st.markdown("---")
 st.caption(f"系統版本：{VERSION} | 最後更新日期：{UPDATE_DATE} | 資料來源：臺灣證券交易所、櫃買中心與公開資訊觀測站")
