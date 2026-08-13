@@ -5,7 +5,7 @@ import os
 import base64
 from google import genai
 
-# 安全載入 yfinance (防止因伺服器未及時安裝套件而導致 ModuleNotFoundError 崩潰)
+# 安全載入 yfinance
 try:
     import yfinance as yf
     YFINANCE_AVAILABLE = True
@@ -15,15 +15,15 @@ except ImportError:
 
 # ==========================================
 # 版本資訊 (Version Info)
-# 版本別：v1.3.1
+# 版本別：v1.3.2
 # 更新日期：2026-08-13
 # 修改內容：
-# 1. 修正 yfinance 匯入防護機制，解決 ModuleNotFoundError 導致的畫面崩潰。
-# 2. 提供配套 requirements.txt 確保 Streamlit Cloud 伺服器環境正確安裝。
-# 3. 完整保留 v1.3.0 之 Gemini AI 模型修復、真實股價對接與狀態記憶邏輯。
+# 1. 修復 Gemini AI 404 報錯 (修正 SDK 模型名稱格式與前綴剝離)。
+# 2. 新增左側篩選參數 URL 網址持久化記憶 (開啟新視窗可保留設定數值)。
+# 3. 新增「🔍 套用條件並開始篩選」手動觸發按鈕 (開新視窗預設不自動跑清單)。
 # ==========================================
 
-VERSION = "v1.3.1"
+VERSION = "v1.3.2"
 UPDATE_DATE = "2026-08-13"
 
 st.set_page_config(
@@ -94,7 +94,7 @@ INDUSTRY_MAP = {
     "2308": "電子零組件業", "2316": "電子零組件業", "3037": "電子零組件業", "2368": "電子零組件業",
     "2317": "其他電子業", "2412": "通信網路業", "2345": "通信網路業", "3008": "光電業", "2409": "光電業",
     "2881": "金融保險業", "2882": "金融保險業", "2892": "金融保險業", "2886": "金融保險業", "2884": "金融保險業", "2885": "金融保險業", "2891": "金融保險業", "2880": "金融保險業",
-    "1101": "水泥工業", "1102": "水泥工業", "1301": "塑膠工業", "1303": "塑膠工業", "1326": "塑膠工業", "2002": "鋼鐵工業", "2006": "鋼鐵工業",
+    "1101": "水泥工業", "1102": "水泥工業", "1301": "塑膠工業", "1303": "塑膠工業", "1326": "塑膠工業", "2002": "鋼鐵工業", "2006": "鋼鐵工業", "2031": "鋼鐵工業",
     "2603": "航運業", "2609": "航運業", "2615": "航運業", "2618": "航運業", "1216": "食品工業", "2207": "汽車工業", "2912": "百貨貿易",
     "2542": "建材營造", "2511": "建材營造", "1707": "生技醫療業", "6446": "生技醫療業", "4147": "生技醫療業"
 }
@@ -209,6 +209,7 @@ def load_stock_data():
         {"Code": "2317", "Name": "鴻海", "Price": 270.0, "PE": 19.2, "Sector_PE_Median": 18.8},
         {"Code": "2308", "Name": "台達電", "Price": 395.0, "PE": 21.0, "Sector_PE_Median": 20.0},
         {"Code": "2881", "Name": "富邦金", "Price": 92.0, "PE": 10.2, "Sector_PE_Median": 12.5},
+        {"Code": "2031", "Name": "新光鋼", "Price": 62.5, "PE": 11.5, "Sector_PE_Median": 18.0},
         {"Code": "6538", "Name": "倉和", "Price": 135.0, "PE": 16.8, "Sector_PE_Median": 22.0}
     ]
     df = pd.DataFrame(fallback_data)
@@ -223,7 +224,6 @@ def load_stock_data():
     df["Low_60D"] = None
     return df, True
 
-# 動態抓取單股真實近 30/60 日歷史 K 線高低價 (含 yfinance 載入防護)
 @st.cache_data(ttl=1800)
 def get_real_stock_history(stock_code):
     if not YFINANCE_AVAILABLE:
@@ -252,20 +252,30 @@ def get_real_stock_history(stock_code):
 df_stocks, is_fallback = load_stock_data()
 
 # ==========================================
+# URL Query Params 長效記憶讀取
+# ==========================================
+query_params = st.query_params
+
+default_ind = query_params.get("ind", "全部產業")
+default_pe_disc = int(query_params.get("pe_disc", -5))
+default_max_sec_pe = float(query_params.get("sec_pe", 30.0))
+default_max_pe = float(query_params.get("max_pe", 25.0))
+default_min_roe = float(query_params.get("roe", 8.0))
+default_min_yoy = float(query_params.get("yoy", -5.0))
+
+# ==========================================
 # 側邊欄設定 (Sidebar)
 # ==========================================
 st.sidebar.header("⚙️ 篩選條件設定")
 st.sidebar.caption(f"目前版本：{VERSION}")
 
-# 手動重新載入證交所數據按鈕
 if st.sidebar.button("🔄 重新載入證交所最新數據"):
     st.cache_data.clear()
     st.sidebar.success("已清空快取並重新載入證交所數據！")
     st.rerun()
 
-# 單一個股精準獨立查詢 (開新分頁不殘留記憶)
 st.sidebar.subheader("🔍 單一個股獨立查詢與健診")
-search_input = st.sidebar.text_input("輸入股票代號/名稱 (例如: 2330 或 2317)：", value="")
+search_input = st.sidebar.text_input("輸入股票代號/名稱 (例如: 2330 或 2031)：", value="")
 
 search_stock_options = ["(不指定 / 觀看全部)"] + [f"{r['Code']} {r['Name']}" for _, r in df_stocks.iterrows()]
 selected_search_stock = st.sidebar.selectbox("或選擇下拉清單：", search_stock_options)
@@ -278,36 +288,53 @@ elif selected_search_stock != "(不指定 / 觀看全部)":
 
 st.sidebar.markdown("---")
 
-# 1. 產業選單 (長效記憶)
 all_industries = ["全部產業"] + sorted(list(df_stocks["Industry"].unique()))
-selected_industry = st.sidebar.selectbox("指定產業類別", all_industries)
+ind_index = all_industries.index(default_ind) if default_ind in all_industries else 0
 
-# 2. 本益比相關篩選 (長效記憶)
+selected_industry = st.sidebar.selectbox("指定產業類別", all_industries, index=ind_index)
+
 pe_discount_threshold = st.sidebar.slider(
     "次產業 PE 折價率上限 (%) [越負代表越低估]",
-    min_value=-50, max_value=20, value=-5, step=5
+    min_value=-50, max_value=20, value=default_pe_disc, step=5
 )
 
 max_sector_pe = st.sidebar.slider(
     "次產業 PE 中位數上限 (倍) [越低代表整體產業估值越平實]",
-    min_value=5.0, max_value=50.0, value=30.0, step=1.0
+    min_value=5.0, max_value=50.0, value=default_max_sec_pe, step=1.0
 )
 
 max_stock_pe = st.sidebar.slider(
     "個股 PE 絕對值上限 (倍) [越低代表購買價格越便宜]",
-    min_value=3.0, max_value=40.0, value=25.0, step=1.0
+    min_value=3.0, max_value=40.0, value=default_max_pe, step=1.0
 )
 
-# 3. 財務指標門檻 (長效記憶)
 min_roe = st.sidebar.number_input(
     "最低 ROE 門檻 (%) [越高代表公司獲利與股東報酬越佳]",
-    value=8.0, step=1.0
+    value=default_min_roe, step=1.0
 )
 
 min_yoy = st.sidebar.number_input(
     "近12個月營收 YoY 成長率門檻 (%) [越高代表營收成長動能越強]",
-    value=-5.0, step=1.0
+    value=default_min_yoy, step=1.0
 )
+
+# 保存記憶至 URL
+st.query_params["ind"] = selected_industry
+st.query_params["pe_disc"] = str(pe_discount_threshold)
+st.query_params["sec_pe"] = str(max_sector_pe)
+st.query_params["max_pe"] = str(max_stock_pe)
+st.query_params["roe"] = str(min_roe)
+st.query_params["yoy"] = str(min_yoy)
+
+# 新增手動篩選按鈕
+st.sidebar.markdown("---")
+btn_run_filter = st.sidebar.button("🔍 套用條件並開始篩選", type="primary", use_container_width=True)
+
+if "filter_executed" not in st.session_state:
+    st.session_state["filter_executed"] = False
+
+if btn_run_filter:
+    st.session_state["filter_executed"] = True
 
 # 資料過濾邏輯
 filtered_df = df_stocks.copy()
@@ -339,7 +366,6 @@ with tab1:
         if len(matched_stocks) > 0:
             stock_data = matched_stocks.iloc[0].to_dict()
             
-            # 動態調閱真實 30D/60D 歷史 K 線高低價數據
             hist_info = get_real_stock_history(stock_data['Code'])
             if hist_info:
                 stock_data["Price"] = hist_info["Latest_Close"]
@@ -348,7 +374,6 @@ with tab1:
                 stock_data["High_60D"] = hist_info["High_60D"]
                 stock_data["Low_60D"] = hist_info["Low_60D"]
             
-            # 第一層：真實股價與高低價歷程
             st.markdown(f"#### 💰 **{stock_data['Name']} ({stock_data['Code']}) 官方真實股價與歷史高低位階**")
             p1, p2, p3, p4, p5 = st.columns(5)
             p1.metric("當前真實股價", f"{stock_data['Price']:.1f} 元" if stock_data['Price'] else "查無數據")
@@ -357,7 +382,6 @@ with tab1:
             p4.metric("近 60 日最高價", f"{stock_data['High_60D']:.1f} 元" if stock_data.get('High_60D') else "擷取中")
             p5.metric("近 60 日最低價", f"{stock_data['Low_60D']:.1f} 元" if stock_data.get('Low_60D') else "擷取中")
             
-            # 第二層：官方估值指標
             sc1, sc2, sc3 = st.columns(3)
             sc1.metric("本益比 (PE) [官方]", f"{stock_data['PE']:.1f} 倍")
             sc2.metric("次產業 PE 折價率", f"{stock_data['次產業_PE折溢價(%)']:.1f}%")
@@ -380,62 +404,65 @@ with tab1:
             
         st.markdown("---")
 
-    col1, col2, col3 = st.columns(3)
-    col1.metric("上市櫃掃描總數", f"{len(df_stocks)} 檔")
-    col2.metric("符合條件潛力股", f"{len(filtered_df)} 檔")
-    avg_discount = filtered_df["次產業_PE折溢價(%)"].mean() if len(filtered_df) > 0 else 0
-    col3.metric("平均 PE 折價率", f"{avg_discount:.1f}%")
-
-    st.subheader("🎯 Qualified Stock Targets (合格標的清單)")
-    
-    if len(filtered_df) > 0:
-        st.markdown("##### ⚙️ 表格顯示欄位自訂與順序調整（可拖曳排順序，自動記憶）")
-        
-        all_optional_cols = {
-            "產業類別": "Industry_Tagged",
-            "當前真實股價": "Price",
-            "本益比(PE)": "PE",
-            "次產業中位數PE": "Sector_PE_Median",
-            "次產業 PE 折溢價(%)": "次產業_PE折溢價(%)"
-        }
-        
-        if "saved_col_order" not in st.session_state:
-            st.session_state["saved_col_order"] = ["產業類別", "當前真實股價", "本益比(PE)", "次產業中位數PE", "次產業 PE 折溢價(%)"]
-
-        selected_col_names = st.multiselect(
-            "請選擇要於畫面顯示的延伸數據項目：",
-            options=list(all_optional_cols.keys()),
-            default=st.session_state["saved_col_order"]
-        )
-        
-        if selected_col_names != st.session_state["saved_col_order"]:
-            st.session_state["saved_col_order"] = selected_col_names
-        
-        display_cols = ["Code", "Name"] + [all_optional_cols[c] for c in selected_col_names if c in all_optional_cols]
-        rename_dict = {
-            "Code": "股票代號",
-            "Name": "股票名稱",
-            "Industry_Tagged": "產業類別",
-            "Price": "當前真實股價",
-            "PE": "本益比(PE)",
-            "Sector_PE_Median": "次產業中位數PE",
-            "次產業_PE折溢價(%)": "次產業 PE 折溢價(%)"
-        }
-        
-        display_df = filtered_df[display_cols].rename(columns=rename_dict)
-        
-        format_mapping = {}
-        for col in display_df.columns:
-            if "PE" in col or "折溢價" in col or "股價" in col:
-                format_mapping[col] = "{:.1f}"
-                
-        st.dataframe(
-            display_df.style.format(format_mapping),
-            use_container_width=True,
-            hide_index=True
-        )
+    if not st.session_state["filter_executed"]:
+        st.info("👈 **請於左側邊欄確認或調整篩選條件後，點擊『🔍 套用條件並開始篩選』按鈕即可產出最新潛力股清單！**")
     else:
-        st.warning("尚無符合當前條件的標的，請適度放寬側邊欄的篩選條件。")
+        col1, col2, col3 = st.columns(3)
+        col1.metric("上市櫃掃描總數", f"{len(df_stocks)} 檔")
+        col2.metric("符合條件潛力股", f"{len(filtered_df)} 檔")
+        avg_discount = filtered_df["次產業_PE折溢價(%)"].mean() if len(filtered_df) > 0 else 0
+        col3.metric("平均 PE 折價率", f"{avg_discount:.1f}%")
+
+        st.subheader("🎯 Qualified Stock Targets (合格標的清單)")
+        
+        if len(filtered_df) > 0:
+            st.markdown("##### ⚙️ 表格顯示欄位自訂與順序調整（可拖曳排順序，自動記憶）")
+            
+            all_optional_cols = {
+                "產業類別": "Industry_Tagged",
+                "當前真實股價": "Price",
+                "本益比(PE)": "PE",
+                "次產業中位數PE": "Sector_PE_Median",
+                "次產業 PE 折溢價(%)": "次產業_PE折溢價(%)"
+            }
+            
+            if "saved_col_order" not in st.session_state:
+                st.session_state["saved_col_order"] = ["產業類別", "當前真實股價", "本益比(PE)", "次產業中位數PE", "次產業 PE 折溢價(%)"]
+
+            selected_col_names = st.multiselect(
+                "請選擇要於畫面顯示的延伸數據項目：",
+                options=list(all_optional_cols.keys()),
+                default=st.session_state["saved_col_order"]
+            )
+            
+            if selected_col_names != st.session_state["saved_col_order"]:
+                st.session_state["saved_col_order"] = selected_col_names
+            
+            display_cols = ["Code", "Name"] + [all_optional_cols[c] for c in selected_col_names if c in all_optional_cols]
+            rename_dict = {
+                "Code": "股票代號",
+                "Name": "股票名稱",
+                "Industry_Tagged": "產業類別",
+                "Price": "當前真實股價",
+                "PE": "本益比(PE)",
+                "Sector_PE_Median": "次產業中位數PE",
+                "次產業_PE折溢價(%)": "次產業 PE 折溢價(%)"
+            }
+            
+            display_df = filtered_df[display_cols].rename(columns=rename_dict)
+            
+            format_mapping = {}
+            for col in display_df.columns:
+                if "PE" in col or "折溢價" in col or "股價" in col:
+                    format_mapping[col] = "{:.1f}"
+                    
+            st.dataframe(
+                display_df.style.format(format_mapping),
+                use_container_width=True,
+                hide_index=True
+            )
+        else:
+            st.warning("尚無符合當前條件的標的，請適度放寬側邊欄的篩選條件並重新點擊篩選。")
 
 with tab2:
     st.subheader("🔍 雙源資料交叉檢視與對照表")
@@ -443,7 +470,9 @@ with tab2:
     本頁面完整呈現 **「臺灣證券交易所 (TWSE) 官方即時 API 資料」** 之對照數據。
     """)
     
-    if len(filtered_df) > 0:
+    if not st.session_state["filter_executed"]:
+        st.info("👈 請先於左側邊欄點擊『🔍 套用條件並開始篩選』按鈕。")
+    elif len(filtered_df) > 0:
         compare_df = filtered_df[["Code", "Name", "Industry_Tagged", "Price", "PE", "Sector_PE_Median"]].copy()
         compare_df.columns = [
             "股票代號 [官方]", 
@@ -464,15 +493,15 @@ with tab2:
             hide_index=True
         )
     else:
-        st.warning("目前篩選條件下無符合標的，請調整側邊欄參數以進行雙源數據檢視。")
+        st.warning("目前篩選條件下無符合標的，請調整側邊欄參數以進行數據檢視。")
 
 with tab3:
     st.subheader("🧠 Gemini AI 智慧個股深度評估")
     
-    if len(filtered_df) == 0:
-        st.info("請先調整側邊欄篩選條件，讓合格標的清單至少包含一檔個股，以進行 AI 診斷。")
+    if len(df_stocks) == 0:
+        st.info("目前無個股數據，請點擊左側重新載入按鈕。")
     else:
-        target_options = [f"{row['Code']} {row['Name']}" for _, row in filtered_df.iterrows()]
+        target_options = [f"{row['Code']} {row['Name']}" for _, row in df_stocks.iterrows()]
         selected_stock_str = st.selectbox("請選擇欲診斷的低估潛力標的：", target_options)
         
         if st.button("🚀 生成 Gemini AI 分析報告"):
@@ -483,7 +512,7 @@ with tab3:
                     try:
                         client = genai.Client(api_key=gemini_key)
                         stock_code = selected_stock_str.split()[0]
-                        target_row = filtered_df[filtered_df["Code"] == stock_code].iloc[0]
+                        target_row = df_stocks[df_stocks["Code"] == stock_code].iloc[0]
                         
                         prompt = f"""
                         你是一位專業的台股資深證券分析師。請針對以下低估潛力標的進行同業競爭力與估值診斷：
@@ -499,11 +528,12 @@ with tab3:
                         3. **綜合診斷評級**：給予明晰的估值診斷總結。
                         """
                         
-                        # 自動比對並選擇目前官方支援的穩定 Flash 模型
-                        available_models = [m.name for m in client.models.list()]
+                        # 自動剝離 models/ 品牌前綴，徹底修復 404 報錯
+                        available_models = [m.name.replace("models/", "") for m in client.models.list()]
+                        
                         target_model = "gemini-1.5-flash"
                         for m_name in available_models:
-                            if "gemini-1.5-flash" in m_name or "gemini-2.0-flash" in m_name:
+                            if "gemini-1.5-flash" in m_name or "gemini-2.0-flash" in m_name or "gemini-2.5-flash" in m_name:
                                 target_model = m_name
                                 break
                         
