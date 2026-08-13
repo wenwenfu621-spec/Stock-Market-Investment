@@ -14,14 +14,13 @@ except ImportError:
 
 # ==========================================
 # 版本資訊 (Version Info)
-# 版本別：v1.4.21
+# 版本別：v1.4.22
 # 更新日期：2026-08-13
 # 修改內容：
-# 1. 新增單一個股篩選條件比對功能：查詢個股時會自動顯示該標的是否符合側邊欄的各項篩選設定。
-# 2. 繼承 v1.4.20 之所有修正（Gemini 逾時設定、參數說明文字）。
+# 1. 強化 Gemini API 容錯機制：加入多模型自動備援（若遇到 503 高負載會自動切換備用模型）。
 # ==========================================
 
-VERSION = "v1.4.21"
+VERSION = "v1.4.22"
 UPDATE_DATE = "2026-08-13"
 
 st.set_page_config(
@@ -258,19 +257,28 @@ def get_real_stock_history(stock_code):
     return None
 
 def call_gemini_api(api_key, prompt):
-    """純 REST API 呼叫，timeout 調高至 60 秒"""
+    """純 REST API 呼叫，加入多模型自動備援機制 (處理 503 過載)"""
     clean_key = str(api_key).strip().strip('"').strip("'")
     if not clean_key: return False, "API Key 為空"
     
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key={clean_key}"
-    try:
-        res = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=60)
-        if res.status_code == 200:
-            return True, res.json()['candidates'][0]['content']['parts'][0]['text']
-        else:
-            return False, f"HTTP {res.status_code}: {res.text}"
-    except Exception as e:
-        return False, str(e)
+    models_to_try = ["gemini-3.5-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
+    last_err = ""
+    
+    for model in models_to_try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={clean_key}"
+        try:
+            res = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=60)
+            if res.status_code == 200:
+                return True, res.json()['candidates'][0]['content']['parts'][0]['text']
+            elif res.status_code == 503:
+                # 伺服器高負載，嘗試下一個備用模型
+                continue
+            else:
+                last_err = f"HTTP {res.status_code}: {res.text}"
+        except Exception as e:
+            last_err = str(e)
+            
+    return False, f"Gemini 模型目前皆過載或回應失敗 (最後錯誤: {last_err})"
 
 def call_openrouter_llama(api_key, prompt):
     """動態爬取 OpenRouter，加入穩定參數與繁體中文系統提示詞"""
@@ -417,7 +425,7 @@ with tab1:
             p4.metric("近 60 日最高價", f"{stock_data.get('High_60D', 0):.1f} 元")
             p5.metric("近 60 日最低價", f"{stock_data.get('Low_60D', 0):.1f} 元")
             
-            # --- 新增：篩選條件比對功能 ---
+            # --- 篩選條件比對功能 ---
             st.markdown("---")
             st.markdown("#### ⚖️ 篩選條件相容性比對")
             checks = [
