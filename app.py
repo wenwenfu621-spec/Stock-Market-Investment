@@ -4,7 +4,7 @@ import requests
 import os
 import base64
 
-# 雙重載入 Gemini API SDK 以確保相容性與穩定生成
+# 載入 Gemini 與 OpenRouter / OpenAI SDK
 try:
     from google import genai
     GENAI_NEW_AVAILABLE = True
@@ -27,15 +27,16 @@ except ImportError:
 
 # ==========================================
 # 版本資訊 (Version Info)
-# 版本別：v1.3.6
+# 版本別：v1.3.7
 # 更新日期：2026-08-13
 # 修改內容：
-# 1. 修正上櫃股票股價 0.0 元問題 (全面對接 TPEx 官方收盤價 API 與 yfinance 雙重補齊)。
-# 2. 徹底重構 Gemini API 直連機制，穩定產出完整 LLM 申論分析報告。
-# 3. 白話文 AI Prompt 提示詞優化：使用易懂白話語言，避免艱深金融專有名詞。
+# 1. 徹底修復 Gemini API 404 報錯 (採用 REST 端點與最新 2.5/Flash 雙重直連)。
+# 2. 結合 OpenRouter 免費 Meta Llama 3 模型，雙 AI (Gemini + Llama) 併行對照。
+# 3. 修復上櫃股票股價 0.0 元問題 (對接 TPEx 官方行情 API + yfinance 補齊)。
+# 4. 白話文 Prompt 提示詞重構：使用親切日常語言解讀，無艱深專有名詞。
 # ==========================================
 
-VERSION = "v1.3.6"
+VERSION = "v1.3.7"
 UPDATE_DATE = "2026-08-13"
 
 st.set_page_config(
@@ -95,7 +96,7 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 st.title("📈 台股價值與潛力股智慧分析系統")
-st.caption(f"📌 版本別：{VERSION} | 🗓️ 更新日期：{UPDATE_DATE} | 結合官方 OpenAPI、真實市場 K 線資料與 Gemini AI 的同業估值診斷平台")
+st.caption(f"📌 版本別：{VERSION} | 🗓️ 更新日期：{UPDATE_DATE} | 結合官方 OpenAPI、真實市場 K 線資料與 Gemini + Meta Llama 雙 AI 的同業估值診斷平台")
 
 # ==========================================
 # 台股官方 33 大產業字典與色彩歸類對照表
@@ -171,13 +172,14 @@ def infer_industry(code, name):
         return "其他電子業"
 
 gemini_key = st.secrets.get("GEMINI_API_KEY", os.getenv("GEMINI_API_KEY", ""))
+openrouter_key = st.secrets.get("OPENROUTER_API_KEY", os.getenv("OPENROUTER_API_KEY", ""))
 
 @st.cache_data(ttl=3600)
 def load_stock_data():
     """整合 TWSE (上市) 與 TPEx (上櫃) 官方 API + 收盤價對接，徹底消除股價 0.0 元問題"""
     all_stocks = []
     
-    # 1. 抓取 TWSE 上市股票與收盤價
+    # 1. TWSE 上市股票與收盤價
     try:
         url_pe = "https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL"
         url_price = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
@@ -205,7 +207,7 @@ def load_stock_data():
     except Exception:
         pass
 
-    # 2. 抓取 TPEx 上櫃股票與收盤價行情 API
+    # 2. TPEx 上櫃股票與收盤價行情 API
     otc_prices = {}
     try:
         url_otc_quotes = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_quotes"
@@ -312,6 +314,56 @@ def get_real_stock_history(stock_code):
     except Exception:
         pass
     return None
+
+def call_gemini_rest_api(api_key, prompt):
+    """採用 REST API 直連模式，徹底消弭 Gemini 404 報錯"""
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+    headers = {"Content-Type": "application/json"}
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}]
+    }
+    try:
+        res = requests.post(url, json=payload, headers=headers, timeout=12)
+        if res.status_code == 200:
+            data = res.json()
+            return True, data['candidates'][0]['content']['parts'][0]['text']
+        else:
+            # 備援嘗試 gemini-2.0-flash
+            url_alt = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+            res_alt = requests.post(url_alt, json=payload, headers=headers, timeout=12)
+            if res_alt.status_code == 200:
+                data_alt = res_alt.json()
+                return True, data_alt['candidates'][0]['content']['parts'][0]['text']
+            return False, f"HTTP {res.status_code}: {res.text}"
+    except Exception as e:
+        return False, str(e)
+
+def call_openrouter_llama(api_key, prompt):
+    """呼叫 OpenRouter 免費 Meta Llama 3 展現對照報告"""
+    url = "https://openrouter.ai/api/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": "meta-llama/llama-3.3-70b-instruct:free",
+        "messages": [{"role": "user", "content": prompt}]
+    }
+    try:
+        res = requests.post(url, json=payload, headers=headers, timeout=15)
+        if res.status_code == 200:
+            data = res.json()
+            return True, data['choices'][0]['message']['content']
+        else:
+            # 備援選用 8b 免費模型
+            payload["model"] = "meta-llama/llama-3.1-8b-instruct:free"
+            res_alt = requests.post(url, json=payload, headers=headers, timeout=15)
+            if res_alt.status_code == 200:
+                data_alt = res_alt.json()
+                return True, data_alt['choices'][0]['message']['content']
+            return False, f"HTTP {res.status_code}: {res.text}"
+    except Exception as e:
+        return False, str(e)
 
 df_stocks, is_fallback = load_stock_data()
 
@@ -427,7 +479,7 @@ filtered_df = filtered_df[
 # ==========================================
 # 主要頁面頁籤 (Main Tabs)
 # ==========================================
-tab1, tab2, tab3 = st.tabs(["📊 篩選總覽與核心數據", "🔍 雙源資料對照表", "🧠 Gemini AI 個股診斷"])
+tab1, tab2, tab3 = st.tabs(["📊 篩選總覽與核心數據", "🔍 雙源資料對照表", "🧠 Gemini & Llama 雙 AI 診斷"])
 
 with tab1:
     if final_search_code:
@@ -497,7 +549,7 @@ with tab1:
         if len(filtered_df) > 0:
             st.markdown("##### ⚙️ 表格顯示欄位自訂與順序調整（可拖曳排順序，自動記憶）")
             
-            # 自動動態為 Price 為 0.0 的上櫃股票補算價格
+            # 自動為 0.0 上櫃個股補算實時價格
             for idx, r in filtered_df.iterrows():
                 if r["Price"] == 0.0 or pd.isnull(r["Price"]):
                     h_info = get_real_stock_history(r["Code"])
@@ -582,7 +634,7 @@ with tab2:
         st.warning("目前篩選條件下無符合標的，請調整側邊欄參數以進行數據檢視。")
 
 with tab3:
-    st.subheader("🧠 Gemini AI 智慧個股深度評估")
+    st.subheader("🧠 Gemini & Meta Llama 雙 AI 智慧白話深度個股診斷")
     
     diagnostic_df = filtered_df.copy()
     if final_search_code:
@@ -600,77 +652,49 @@ with tab3:
         target_options = [f"{row['Code']} {row['Name']}" for _, row in diagnostic_df.iterrows()]
         selected_stock_str = st.selectbox("請選擇欲診斷的合格低估標的：", target_options)
         
-        if st.button("🚀 生成 Gemini AI 分析報告"):
-            if not gemini_key:
-                st.error("❌ 未偵測到 Gemini API 金鑰。請於 Streamlit Cloud 的 Secrets 中填入 `GEMINI_API_KEY`。")
-            else:
-                with st.spinner("AI 正在調閱個股財報與市場研報數據進行同業估值診斷..."):
-                    stock_code = selected_stock_str.split()[0]
-                    target_row = df_stocks[df_stocks["Code"] == stock_code].iloc[0]
-                    
-                    # 問題點 3 修復：白話文親民 Prompt 提示詞
-                    prompt = f"""
-                    你是一位說話親切、條理清晰的股票投資助手。請用一般非專業人士、一般社會大眾都能輕鬆看懂的「通俗白話文」，為我解讀以下股票：
-                    
-                    - 股票名稱：{target_row['Name']} ({target_row['Code']})
-                    - 所屬產業：{target_row['Industry']}
-                    - 目前股價：{target_row['Price']} 元
-                    - 本益比：{target_row['PE']} 倍 (同產業平均大約是：{target_row['Sector_PE_Median']} 倍，這代表股價比同業便宜了約 {abs(target_row['次產業_PE折溢價(%)']):.1f}%)
+        if st.button("🚀 一鍵生成 Gemini + Llama 雙 AI 白話對照報告"):
+            stock_code = selected_stock_str.split()[0]
+            target_row = df_stocks[df_stocks["Code"] == stock_code].iloc[0]
+            
+            prompt = f"""
+            你是一位說話親切、條理清晰的股票投資助手。請用一般非專業人士、一般社會大眾都能輕鬆看懂的「通俗白話文」，為我解讀以下股票：
+            
+            - 股票名稱：{target_row['Name']} ({target_row['Code']})
+            - 所屬產業：{target_row['Industry']}
+            - 目前股價：{target_row['Price']} 元
+            - 本益比：{target_row['PE']} 倍 (同產業平均大約是：{target_row['Sector_PE_Median']} 倍，這代表股價比同業便宜了約 {abs(target_row['次產業_PE折溢價(%)']):.1f}%)
 
-                    請提供一份白話簡明、條列清晰的分析報告（請避免使用艱深的金融學術名詞，用日常大白話說明即可）：
-                    1. 💡 **價格便宜程度說明**：用簡單的口語說明這檔股票現在的價格比同業便宜還是貴？為什麼會比較便宜？
-                    2. 🏢 **公司主要靠什麼賺錢**：用一兩句話簡單介紹這家公司在做什麼業務、有什麼優勢？
-                    3. ⚖️ **白話總評與注意事項**：給一般投資人的溫馨提示，買進這檔股票有什麼好處與需要特別注意的風險。
-                    """
-                    
-                    report_text = ""
-                    ai_success = False
-                    error_msg = ""
-                    
-                    # 問題點 2 修復：直連標準 Gemini 模型 API 端點
-                    # 優先嘗試路線 1: legacy google.generativeai
-                    if GENAI_LEGACY_AVAILABLE:
-                        try:
-                            genai_legacy.configure(api_key=gemini_key)
-                            for m in ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-pro"]:
-                                try:
-                                    model_obj = genai_legacy.GenerativeModel(m)
-                                    res = model_obj.generate_content(prompt)
-                                    if res and res.text:
-                                        report_text = res.text
-                                        ai_success = True
-                                        break
-                                except Exception as inner_e:
-                                    error_msg = str(inner_e)
-                                    continue
-                        except Exception as e:
-                            error_msg = str(e)
-                    
-                    # 備援嘗試路線 2: new google.genai
-                    if not ai_success and GENAI_NEW_AVAILABLE:
-                        try:
-                            client = genai.Client(api_key=gemini_key)
-                            for m_name in ["gemini-1.5-flash", "gemini-2.0-flash"]:
-                                try:
-                                    res = client.models.generate_content(
-                                        model=m_name,
-                                        contents=prompt
-                                    )
-                                    if res and res.text:
-                                        report_text = res.text
-                                        ai_success = True
-                                        break
-                                except Exception as inner_e:
-                                    error_msg = str(inner_e)
-                                    continue
-                        except Exception as e:
-                            error_msg = str(e)
-                    
-                    if ai_success:
-                        st.markdown(report_text)
-                    else:
-                        st.error(f"❌ Gemini AI 連線回應失敗。詳細 API 錯誤訊息為：`{error_msg}`。\n\n"
-                                 f"請檢查 Streamlit Cloud 的 `GEMINI_API_KEY` 是否有效或配額是否充足。")
+            請提供一份白話簡明、條列清晰的分析報告（請避免使用艱深的金融學術名詞，用日常大白話說明即可）：
+            1. 💡 **價格便宜程度說明**：用簡單口語說明這檔股票價格比同業便宜還是貴？為什麼會比較便宜？
+            2. 🏢 **公司主要靠什麼賺錢**：用一兩句話簡單介紹這家公司在做什麼業務、有什麼優勢？
+            3. ⚖️ **白話總評與注意事項**：給一般投資人的溫馨提示，買進這檔股票有什麼好處與需要特別注意的風險。
+            """
+            
+            col_gemini, col_llama = st.columns(2)
+            
+            with col_gemini:
+                st.markdown("### 🧠 Gemini AI 白話分析報告")
+                if not gemini_key:
+                    st.error("❌ 未偵測到 Gemini API 金鑰。請於 Secrets 設定 `GEMINI_API_KEY`。")
+                else:
+                    with st.spinner("Gemini 正在產生白話報告..."):
+                        g_success, g_res = call_gemini_rest_api(gemini_key, prompt)
+                        if g_success:
+                            st.markdown(g_res)
+                        else:
+                            st.error(f"❌ Gemini 回應失敗：`{g_res}`")
+                            
+            with col_llama:
+                st.markdown("### 🦙 Meta Llama 3 (OpenRouter) 白話分析報告")
+                if not openrouter_key:
+                    st.error("❌ 未偵測到 OpenRouter API 金鑰。請於 Secrets 設定 `OPENROUTER_API_KEY`。")
+                else:
+                    with st.spinner("Meta Llama 3 正在產生白話報告..."):
+                        l_success, l_res = call_openrouter_llama(openrouter_key, prompt)
+                        if l_success:
+                            st.markdown(l_res)
+                        else:
+                            st.error(f"❌ Llama 回應失敗：`{l_res}`")
 
 st.markdown("---")
 st.caption(f"系統版本：{VERSION} | 最後更新日期：{UPDATE_DATE} | 資料來源：臺灣證券交易所、櫃買中心與公開資訊觀測站")
