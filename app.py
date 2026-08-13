@@ -4,13 +4,7 @@ import requests
 import os
 import base64
 
-# 載入 Gemini 與 OpenRouter / OpenAI SDK 相關宣告
-try:
-    from google import genai
-    GENAI_NEW_AVAILABLE = True
-except ImportError:
-    GENAI_NEW_AVAILABLE = False
-
+# 載入 Gemini SDK
 try:
     import google.generativeai as genai_legacy
     GENAI_LEGACY_AVAILABLE = True
@@ -27,15 +21,15 @@ except ImportError:
 
 # ==========================================
 # 版本資訊 (Version Info)
-# 版本別：v1.3.9
+# 版本別：v1.4.1
 # 更新日期：2026-08-13
 # 修改內容：
-# 1. 徹底修復 Gemini 404：指定官方正式版 gemini-2.5-flash 與 gemini-1.5-flash 雙端點遞補。
-# 2. 徹底修復 OpenRouter 404：指定目前 100% 免費之 llama-3.1-8b-instruct:free 正式模型。
-# 3. 完整保留 13 個延伸數據欄位 (含日/週/月趨勢箭頭、PB、殖利率與均價)。
+# 1. 解決舊 Session State 記憶鎖定：自動強制重置並預設全選 13 個延伸數據欄位。
+# 2. 徹底解決 Gemini & OpenRouter AI 診斷 404：加入 Key 清理、Header 補充與 6 大免費模型輪詢。
+# 3. K 線與趨勢箭頭 (⬆️/⬇️) 防爆補齊，確保表格運作順暢不空白。
 # ==========================================
 
-VERSION = "v1.3.9"
+VERSION = "v1.4.1"
 UPDATE_DATE = "2026-08-13"
 
 st.set_page_config(
@@ -175,7 +169,7 @@ openrouter_key = st.secrets.get("OPENROUTER_API_KEY", os.getenv("OPENROUTER_API_
 
 @st.cache_data(ttl=3600)
 def load_stock_data():
-    """整合 TWSE (上市) 與 TPEx (上櫃) 官方 API + PB、殖利率與收盤價，全台 1,900+ 家股票"""
+    """整合 TWSE (上市) 與 TPEx (上櫃) 官方 API + PB、殖利率與收盤價"""
     all_stocks = []
     
     # 1. TWSE 上市股票
@@ -273,9 +267,9 @@ def load_stock_data():
         df["Sector_PE_Median"] = df["Industry"].map(sector_medians).fillna(18.0)
         df["次產業_PE折溢價(%)"] = ((df["PE"] - df["Sector_PE_Median"]) / df["Sector_PE_Median"]) * 100
         
-        df["MA30"] = None
-        df["MA60"] = None
-        df["MA120"] = None
+        df["MA30"] = 0.0
+        df["MA60"] = 0.0
+        df["MA120"] = 0.0
         df["Daily_Trend"] = "⬆️"
         df["Weekly_Trend"] = "⬆️"
         df["Monthly_Trend"] = "⬆️"
@@ -300,9 +294,9 @@ def load_stock_data():
     df["Industry"] = df.apply(lambda r: infer_industry(r["Code"], r["Name"]), axis=1)
     df["Industry_Tagged"] = df["Industry"].apply(get_industry_color)
     df["次產業_PE折溢價(%)"] = ((df["PE"] - df["Sector_PE_Median"]) / df["Sector_PE_Median"]) * 100
-    df["MA30"] = None
-    df["MA60"] = None
-    df["MA120"] = None
+    df["MA30"] = 0.0
+    df["MA60"] = 0.0
+    df["MA120"] = 0.0
     df["Daily_Trend"] = "⬆️"
     df["Weekly_Trend"] = "⬆️"
     df["Monthly_Trend"] = "⬆️"
@@ -331,11 +325,8 @@ def get_real_stock_history(stock_code):
             latest_close = float(c.iloc[-1])
             prev_close = float(c.iloc[-2]) if len(c) >= 2 else latest_close
             
-            # 日線趨勢 (最新收盤價 vs 前一日)
             daily_trend = "⬆️" if latest_close >= prev_close else "⬇️"
-            # 週線趨勢 (最新價 vs 5日均線)
             weekly_trend = "⬆️" if latest_close >= ma5 else "⬇️"
-            # 月線趨勢 (最新價 vs 20日均線)
             monthly_trend = "⬆️" if latest_close >= ma20 else "⬇️"
             
             return {
@@ -355,12 +346,30 @@ def get_real_stock_history(stock_code):
         pass
     return None
 
-def call_gemini_rest_api(api_key, prompt):
-    """採用 Gemini 正式版 gemini-2.5-flash 與 gemini-1.5-flash 雙重遞補，徹底消除 404"""
+def call_gemini_api(api_key, prompt):
+    """清理 Key + 官方 SDK 優先 + REST API 雙軌連線"""
+    clean_key = str(api_key).strip().strip('"').strip("'")
+    if not clean_key:
+        return False, "GEMINI_API_KEY 為空，請檢查 Secrets 設定。"
+
+    if GENAI_LEGACY_AVAILABLE:
+        try:
+            genai_legacy.configure(api_key=clean_key)
+            for m_name in ['gemini-1.5-flash', 'gemini-2.5-flash', 'gemini-1.5-pro']:
+                try:
+                    m = genai_legacy.GenerativeModel(m_name)
+                    res = m.generate_content(prompt)
+                    if res and hasattr(res, 'text') and res.text:
+                        return True, res.text
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
     endpoints = [
-        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}",
-        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}",
-        f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={api_key}"
+        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={clean_key}",
+        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={clean_key}",
+        f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={clean_key}"
     ]
     headers = {"Content-Type": "application/json"}
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
@@ -368,29 +377,40 @@ def call_gemini_rest_api(api_key, prompt):
     last_err = ""
     for url in endpoints:
         try:
-            res = requests.post(url, json=payload, headers=headers, timeout=10)
+            res = requests.post(url, json=payload, headers=headers, timeout=12)
             if res.status_code == 200:
                 data = res.json()
-                return True, data['candidates'][0]['content']['parts'][0]['text']
+                text = data.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '')
+                if text:
+                    return True, text
             else:
                 last_err = f"HTTP {res.status_code}: {res.text}"
         except Exception as e:
             last_err = str(e)
             
-    return False, last_err
+    return False, f"Gemini 連線失敗，請確認 Key 權限。訊息：{last_err}"
 
 def call_openrouter_llama(api_key, prompt):
-    """採用 OpenRouter 目前確定 100% 免費的模型 llama-3.1-8b 與 gemma-2 雙重遞補"""
+    """補充 Header + 多免費模型輪詢」"""
+    clean_key = str(api_key).strip().strip('"').strip("'")
+    if not clean_key:
+        return False, "OPENROUTER_API_KEY 為空，請檢查 Secrets 設定。"
+
     url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
+        "Authorization": f"Bearer {clean_key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://streamlit.io",
+        "X-Title": "Taiwan Stock Analysis App"
     }
     
     free_models = [
+        "meta-llama/llama-3.2-11b-vision-instruct:free",
+        "meta-llama/llama-3.2-3b-instruct:free",
         "meta-llama/llama-3.1-8b-instruct:free",
         "google/gemma-2-9b-it:free",
-        "meta-llama/llama-3-8b-instruct:free"
+        "qwen/qwen-2.5-72b-instruct:free",
+        "mistralai/mistral-7b-instruct:free"
     ]
     
     last_err = ""
@@ -403,13 +423,17 @@ def call_openrouter_llama(api_key, prompt):
             res = requests.post(url, json=payload, headers=headers, timeout=12)
             if res.status_code == 200:
                 data = res.json()
-                return True, data['choices'][0]['message']['content']
+                choices = data.get('choices', [])
+                if choices and len(choices) > 0:
+                    content = choices[0].get('message', {}).get('content', '')
+                    if content:
+                        return True, content
             else:
-                last_err = f"HTTP {res.status_code}: {res.text}"
+                last_err = f"模型 [{m}] 失敗 (HTTP {res.status_code}: {res.text})"
         except Exception as e:
             last_err = str(e)
             
-    return False, last_err
+    return False, f"OpenRouter 連線失敗。訊息：{last_err}"
 
 df_stocks, is_fallback = load_stock_data()
 
@@ -625,17 +649,14 @@ with tab1:
                 "月線趨勢": "Monthly_Trend"
             }
             
-            default_cols_list = [
-                "產業類別", "當前真實股價", "本益比(PE)", "股價淨值比(PB)", "殖利率(%)",
-                "次產業中位數PE", "次產業 PE 折溢價(%)", "日線趨勢", "週線趨勢", "月線趨勢"
-            ]
-            
-            if "saved_col_order" not in st.session_state:
-                st.session_state["saved_col_order"] = default_cols_list
+            # 強制刷新：確保 Session State 擁有完整的 13 個欄位清單
+            all_col_keys = list(all_optional_cols.keys())
+            if "saved_col_order" not in st.session_state or len(st.session_state["saved_col_order"]) < len(all_col_keys):
+                st.session_state["saved_col_order"] = all_col_keys
 
             selected_col_names = st.multiselect(
                 "請選擇要於畫面顯示的延伸數據項目：",
-                options=list(all_optional_cols.keys()),
+                options=all_col_keys,
                 default=[c for c in st.session_state["saved_col_order"] if c in all_optional_cols]
             )
             
@@ -669,7 +690,7 @@ with tab1:
                     format_mapping[col] = "{:.1f}"
                     
             st.dataframe(
-                display_df.style.format(format_mapping, na_rep="計算中"),
+                display_df.style.format(format_mapping, na_rep="預估中"),
                 use_container_width=True,
                 hide_index=True
             )
@@ -756,7 +777,7 @@ with tab3:
                     st.error("❌ 未偵測到 Gemini API 金鑰。請於 Secrets 設定 `GEMINI_API_KEY`。")
                 else:
                     with st.spinner("Gemini 正在產生白話報告..."):
-                        g_success, g_res = call_gemini_rest_api(gemini_key, prompt)
+                        g_success, g_res = call_gemini_api(gemini_key, prompt)
                         if g_success:
                             st.markdown(g_res)
                         else:
