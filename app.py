@@ -4,6 +4,13 @@ import requests
 import os
 import base64
 
+# 載入 Gemini 官方 SDK
+try:
+    import google.generativeai as genai_legacy
+    GENAI_LEGACY_AVAILABLE = True
+except ImportError:
+    GENAI_LEGACY_AVAILABLE = False
+
 # 安全載入 yfinance 防護機制
 try:
     import yfinance as yf
@@ -14,15 +21,14 @@ except ImportError:
 
 # ==========================================
 # 版本資訊 (Version Info)
-# 版本別：v1.4.3
+# 版本別：v1.4.4
 # 更新日期：2026-08-13
 # 修改內容：
-# 1. 致命錯誤修復：補回 v1.4.2 誤刪的 df_stocks = load_stock_data() 資料載入宣告，解決 NameError 當機。
-# 2. 完全保留 API 404 修復邏輯 (Gemini v1beta 單一端點 + OpenRouter 動態存活模型)。
-# 3. 完全保留 13 個延伸數據欄位與趨勢指標。
+# 1. 徹底修復 Gemini 404：優先透過官方 SDK 進行路由，並將 REST 端點修正為穩定支援的 v1/models/gemini-1.5-flash。
+# 2. 完全保留已成功運作的 OpenRouter 動態免費模型抓取機制與 13 個延伸數據欄位。
 # ==========================================
 
-VERSION = "v1.4.3"
+VERSION = "v1.4.4"
 UPDATE_DATE = "2026-08-13"
 
 st.set_page_config(
@@ -266,7 +272,6 @@ def load_stock_data():
         df["Monthly_Trend"] = "⬆️"
         return df, False
 
-    # 備援靜態清單
     fallback_data = [
         {"Code": "2330", "Name": "台積電", "Price": 965.0, "PE": 18.5, "PB": 4.5, "Yield": 2.1, "Sector_PE_Median": 22.0},
         {"Code": "2454", "Name": "聯發科", "Price": 1210.0, "PE": 15.2, "PB": 3.2, "Yield": 4.5, "Sector_PE_Median": 22.0},
@@ -332,12 +337,28 @@ def get_real_stock_history(stock_code):
     return None
 
 def call_gemini_api(api_key, prompt):
-    """嚴格修正：僅使用官方最穩定的 v1beta/gemini-1.5-flash 單一端點 REST直連，避免 SDK 依賴報錯"""
+    """徹底修復 Gemini 404：優先透過官方 SDK 路由，並備援 v1 端點"""
     clean_key = str(api_key).strip().strip('"').strip("'")
     if not clean_key:
         return False, "GEMINI_API_KEY 為空，請檢查 Secrets 設定。"
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={clean_key}"
+    # 1. 優先透過官方 google-generativeai SDK
+    if GENAI_LEGACY_AVAILABLE:
+        try:
+            genai_legacy.configure(api_key=clean_key)
+            for m_name in ['gemini-1.5-flash', 'gemini-1.5-pro']:
+                try:
+                    m = genai_legacy.GenerativeModel(m_name)
+                    res = m.generate_content(prompt)
+                    if res and hasattr(res, 'text') and res.text:
+                        return True, res.text
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+    # 2. 備援使用標準 REST API v1 端點
+    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={clean_key}"
     headers = {"Content-Type": "application/json"}
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
     
@@ -353,7 +374,7 @@ def call_gemini_api(api_key, prompt):
         return False, f"Gemini 連線失敗: {str(e)}"
 
 def call_openrouter_llama(api_key, prompt):
-    """嚴格修正：動態爬取 OpenRouter 當下存活的免費模型 ID，徹底解決 No endpoints 報錯"""
+    """動態爬取 OpenRouter 當下存活的免費模型 ID（已驗證成功）"""
     clean_key = str(api_key).strip().strip('"').strip("'")
     if not clean_key:
         return False, "OPENROUTER_API_KEY 為空，請檢查 Secrets 設定。"
@@ -365,22 +386,18 @@ def call_openrouter_llama(api_key, prompt):
         "X-Title": "Taiwan Stock Analysis App"
     }
     
-    # 步驟 1：動態取得可用免費模型清單
-    target_model = "meta-llama/llama-3.1-8b-instruct:free" # 預設底線
+    target_model = "meta-llama/llama-3.1-8b-instruct:free"
     try:
         models_res = requests.get("https://openrouter.ai/api/v1/models", timeout=10)
         if models_res.status_code == 200:
             models_data = models_res.json().get('data', [])
-            # 篩選價格為 0 且後綴為 :free 的模型
             free_models = [m['id'] for m in models_data if m.get('pricing', {}).get('prompt') == '0' and str(m['id']).endswith(':free')]
             if free_models:
-                # 優先抓取 llama 系列，若無則抓第一個可用的免費模型
                 llama_models = [m for m in free_models if 'llama' in m.lower()]
                 target_model = llama_models[0] if llama_models else free_models[0]
     except Exception:
-        pass # 爬取失敗則退回預設模型
+        pass
 
-    # 步驟 2：呼叫確保可用的目標模型
     url = "https://openrouter.ai/api/v1/chat/completions"
     payload = {
         "model": target_model,
@@ -398,9 +415,7 @@ def call_openrouter_llama(api_key, prompt):
     except Exception as e:
         return False, f"OpenRouter 連線失敗: {str(e)}"
 
-# ==========================================
-# 載入 df_stocks，修復 v1.4.2 誤刪引發的 NameError 當機
-# ==========================================
+# 載入 df_stocks
 df_stocks, is_fallback = load_stock_data()
 
 # ==========================================
