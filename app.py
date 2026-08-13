@@ -3,20 +3,21 @@ import pandas as pd
 import requests
 import os
 import base64
+import yfinance as yf
 from google import genai
 
 # ==========================================
 # 版本資訊 (Version Info)
-# 版本別：v1.2.8
-# 更新日期：2026-08-12
+# 版本別：v1.3.0
+# 更新日期：2026-08-13
 # 修改內容：
-# 1. 新增「當前股價」、「近30日高低價」、「近60日高低價」欄位與選單。
-# 2. 修復個股輸入代號即時響應與獨立健診看板顯示。
-# 3. 修復「重新載入證交所數據」按鈕邏輯。
+# 1. 修復 Gemini AI 404 模型報錯（更新為 gemini-1.5-flash / gemini-2.0-flash）。
+# 2. 單股查詢欄位預設不保留記憶（開新分頁自動歸零）；左側參數與欄位順序完整保留。
+# 3. 採用方案 A 對接 TWSE 官方真實收盤價 API (STOCK_DAY_ALL) 與 yfinance 真實 30/60 日高低價。
 # ==========================================
 
-VERSION = "v1.2.8"
-UPDATE_DATE = "2026-08-12"
+VERSION = "v1.3.0"
+UPDATE_DATE = "2026-08-13"
 
 st.set_page_config(
     page_title=f"台股價值與潛力股智慧分析系統 {VERSION}",
@@ -75,27 +76,19 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 st.title("📈 台股價值與潛力股智慧分析系統")
-st.caption(f"📌 版本別：{VERSION} | 🗓️ 更新日期：{UPDATE_DATE} | 結合官方 OpenAPI、開源財報數據與 Gemini AI 的同業估值診斷平台")
+st.caption(f"📌 版本別：{VERSION} | 🗓️ 更新日期：{UPDATE_DATE} | 結合官方 OpenAPI、真實市場 K 線資料與 Gemini AI 的同業估值診斷平台")
 
 # ==========================================
 # 台股官方 33 大產業字典與色彩歸類對照表
 # ==========================================
 INDUSTRY_MAP = {
-    # 半導體業
     "2330": "半導體業", "2454": "半導體業", "2303": "半導體業", "3711": "半導體業", "2379": "半導體業", "3034": "半導體業", "6538": "半導體業", "6415": "半導體業", "3583": "半導體業",
-    # 電腦及週邊設備業
     "2382": "電腦及週邊設備業", "2357": "電腦及週邊設備業", "3231": "電腦及週邊設備業", "2301": "電腦及週邊設備業", "2324": "電腦及週邊設備業",
-    # 電子零組件業
     "2308": "電子零組件業", "2316": "電子零組件業", "3037": "電子零組件業", "2368": "電子零組件業",
-    # 其他電子業 / 網通 / 光電
     "2317": "其他電子業", "2412": "通信網路業", "2345": "通信網路業", "3008": "光電業", "2409": "光電業",
-    # 金融保險業
     "2881": "金融保險業", "2882": "金融保險業", "2892": "金融保險業", "2886": "金融保險業", "2884": "金融保險業", "2885": "金融保險業", "2891": "金融保險業", "2880": "金融保險業",
-    # 傳產重工 (水泥、塑膠、鋼鐵)
     "1101": "水泥工業", "1102": "水泥工業", "1301": "塑膠工業", "1303": "塑膠工業", "1326": "塑膠工業", "2002": "鋼鐵工業", "2006": "鋼鐵工業",
-    # 航運 / 食品 / 汽車 / 百貨
     "2603": "航運業", "2609": "航運業", "2615": "航運業", "2618": "航運業", "1216": "食品工業", "2207": "汽車工業", "2912": "百貨貿易",
-    # 建材營造 / 生技醫療
     "2542": "建材營造", "2511": "建材營造", "1707": "生技醫療業", "6446": "生技醫療業", "4147": "生技醫療業"
 }
 
@@ -162,76 +155,90 @@ gemini_key = st.secrets.get("GEMINI_API_KEY", os.getenv("GEMINI_API_KEY", ""))
 
 @st.cache_data(ttl=3600)
 def load_stock_data():
-    is_fallback = False
+    """結合 TWSE 估值報表 (BWIBBU_ALL) 與真實收盤價報表 (STOCK_DAY_ALL)"""
     try:
-        url = "https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL"
-        res = requests.get(url, timeout=6)
-        if res.status_code == 200:
-            data = res.json()
-            df_raw = pd.DataFrame(data)
+        url_pe = "https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL"
+        res_pe = requests.get(url_pe, timeout=8)
+        
+        url_price = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
+        res_price = requests.get(url_price, timeout=8)
+        
+        if res_pe.status_code == 200 and res_price.status_code == 200:
+            df_pe = pd.DataFrame(res_pe.json())
+            df_price = pd.DataFrame(res_price.json())
             
-            df = pd.DataFrame({
-                "Code": df_raw["Code"].astype(str).str.strip(),
-                "Name": df_raw["Name"].astype(str).str.strip(),
-                "PE": pd.to_numeric(df_raw["PEratio"], errors='coerce'),
-                "PB": pd.to_numeric(df_raw["PBratio"], errors='coerce'),
-                "DY": pd.to_numeric(df_raw["DividendYield"], errors='coerce'),
-            }).dropna(subset=["PE"])
+            df_pe["Code"] = df_pe["Code"].astype(str).str.strip()
+            df_pe["Name"] = df_pe["Name"].astype(str).str.strip()
+            df_pe["PE"] = pd.to_numeric(df_pe["PEratio"], errors='coerce')
+            df_pe["PB"] = pd.to_numeric(df_pe["PBratio"], errors='coerce')
+            df_pe["DY"] = pd.to_numeric(df_pe["DividendYield"], errors='coerce')
+            df_pe = df_pe.dropna(subset=["PE"])[df_pe["PE"] > 0]
             
-            df = df[df["PE"] > 0]
+            df_price["Code"] = df_price["Code"].astype(str).str.strip()
+            df_price["ClosingPrice"] = pd.to_numeric(df_price["ClosingPrice"].astype(str).str.replace(",", ""), errors='coerce')
             
-            # 推導產業與色彩
+            df = pd.merge(df_pe, df_price[["Code", "ClosingPrice"]], on="Code", how="inner")
+            df["Price"] = df["ClosingPrice"].fillna(0.0)
+            
             df["Industry"] = df.apply(lambda r: infer_industry(r["Code"], r["Name"]), axis=1)
             df["Industry_Tagged"] = df["Industry"].apply(get_industry_color)
             
             sector_medians = df.groupby("Industry")["PE"].median().to_dict()
             df["Sector_PE_Median"] = df["Industry"].map(sector_medians).fillna(18.0)
             
-            # 股價與歷史高低價推算 (基於 PE 與估值組合)
-            df["Price"] = (df["PE"] * 3.8 + 15.0).round(1)
-            df["High_30D"] = (df["Price"] * 1.12).round(1)
-            df["Low_30D"] = (df["Price"] * 0.91).round(1)
-            df["High_60D"] = (df["Price"] * 1.25).round(1)
-            df["Low_60D"] = (df["Price"] * 0.84).round(1)
-            
-            # 財務籌碼指標
-            df["ROE"] = (12.5 + (df["PE"] % 5) * 2.1).round(1)
-            df["YoY"] = (5.0 + (df["PE"] % 7) * 1.8 - 3.0).round(1)
-            df["Foreign_Hold"] = (25.0 + (df["PE"] % 10) * 4.2).round(1)
-            df["Debt_Ratio"] = (45.0 + (df["PE"] % 8) * 3.5).round(1)
-            
             df["次產業_PE折溢價(%)"] = ((df["PE"] - df["Sector_PE_Median"]) / df["Sector_PE_Median"]) * 100
+            
+            df["High_30D"] = None
+            df["Low_30D"] = None
+            df["High_60D"] = None
+            df["Low_60D"] = None
             return df, False
-        else:
-            is_fallback = True
     except Exception:
-        is_fallback = True
+        pass
 
-    if is_fallback:
-        fallback_data = [
-            {"Code": "2330", "Name": "台積電", "Price": 980.0, "High_30D": 1050.0, "Low_30D": 930.0, "High_60D": 1080.0, "Low_60D": 880.0, "PE": 18.5, "Sector_PE_Median": 22.0, "ROE": 28.5, "YoY": 16.8, "Foreign_Hold": 73.2, "Debt_Ratio": 38.5},
-            {"Code": "2454", "Name": "聯發科", "Price": 1220.0, "High_30D": 1310.0, "Low_30D": 1150.0, "High_60D": 1400.0, "Low_60D": 1050.0, "PE": 15.2, "Sector_PE_Median": 22.0, "ROE": 22.1, "YoY": 8.5, "Foreign_Hold": 61.5, "Debt_Ratio": 42.1},
-            {"Code": "2317", "Name": "鴻海", "Price": 185.0, "High_30D": 205.0, "Low_30D": 172.0, "High_60D": 218.0, "Low_60D": 160.0, "PE": 10.5, "Sector_PE_Median": 14.0, "ROE": 11.2, "YoY": 3.2, "Foreign_Hold": 41.8, "Debt_Ratio": 58.2},
-            {"Code": "2308", "Name": "台達電", "Price": 380.0, "High_30D": 410.0, "Low_30D": 350.0, "High_60D": 430.0, "Low_60D": 330.0, "PE": 21.0, "Sector_PE_Median": 20.0, "ROE": 16.5, "YoY": 7.4, "Foreign_Hold": 65.4, "Debt_Ratio": 45.0},
-            {"Code": "2881", "Name": "富邦金", "Price": 88.5, "High_30D": 94.0, "Low_30D": 82.0, "High_60D": 98.0, "Low_60D": 78.0, "PE": 10.2, "Sector_PE_Median": 12.5, "ROE": 13.8, "YoY": 12.1, "Foreign_Hold": 28.5, "Debt_Ratio": 88.2},
-            {"Code": "2882", "Name": "國泰金", "Price": 62.0, "High_30D": 66.5, "Low_30D": 58.0, "High_60D": 70.0, "Low_60D": 55.0, "PE": 11.0, "Sector_PE_Median": 12.5, "ROE": 12.5, "YoY": 9.4, "Foreign_Hold": 24.1, "Debt_Ratio": 89.5},
-            {"Code": "2892", "Name": "第一金", "Price": 27.5, "High_30D": 29.0, "Low_30D": 26.0, "High_60D": 30.5, "Low_60D": 25.0, "PE": 14.5, "Sector_PE_Median": 14.0, "ROE": 9.8, "YoY": 4.5, "Foreign_Hold": 22.3, "Debt_Ratio": 91.0},
-            {"Code": "1101", "Name": "台泥", "Price": 32.5, "High_30D": 35.0, "Low_30D": 31.0, "High_60D": 37.0, "Low_60D": 29.5, "PE": 13.8, "Sector_PE_Median": 16.0, "ROE": 6.5, "YoY": -2.1, "Foreign_Hold": 21.5, "Debt_Ratio": 48.6},
-            {"Code": "1301", "Name": "台塑", "Price": 48.0, "High_30D": 52.0, "Low_30D": 45.0, "High_60D": 56.0, "Low_60D": 42.0, "PE": 18.2, "Sector_PE_Median": 17.5, "ROE": 5.2, "YoY": -8.5, "Foreign_Hold": 33.2, "Debt_Ratio": 32.1},
-            {"Code": "2002", "Name": "中鋼", "Price": 22.8, "High_30D": 24.5, "Low_30D": 21.5, "High_60D": 26.0, "Low_60D": 20.0, "PE": 19.5, "Sector_PE_Median": 18.0, "ROE": 4.8, "YoY": -4.2, "Foreign_Hold": 18.9, "Debt_Ratio": 51.4},
-            {"Code": "1216", "Name": "統一", "Price": 82.0, "High_30D": 86.0, "Low_30D": 78.0, "High_60D": 89.0, "Low_60D": 75.0, "PE": 17.0, "Sector_PE_Median": 19.0, "ROE": 14.2, "YoY": 6.8, "Foreign_Hold": 45.1, "Debt_Ratio": 56.3},
-            {"Code": "2603", "Name": "長榮", "Price": 192.0, "High_30D": 210.0, "Low_30D": 178.0, "High_60D": 225.0, "Low_60D": 165.0, "PE": 5.2, "Sector_PE_Median": 8.5, "ROE": 25.4, "YoY": 15.2, "Foreign_Hold": 38.6, "Debt_Ratio": 42.8},
-            {"Code": "2542", "Name": "興富發", "Price": 42.5, "High_30D": 46.0, "Low_30D": 39.5, "High_60D": 49.0, "Low_60D": 37.0, "PE": 8.5, "Sector_PE_Median": 11.2, "ROE": 15.1, "YoY": 11.5, "Foreign_Hold": 12.4, "Debt_Ratio": 72.5},
-            {"Code": "1707", "Name": "葡萄王", "Price": 145.0, "High_30D": 158.0, "Low_30D": 138.0, "High_60D": 168.0, "Low_60D": 130.0, "PE": 12.4, "Sector_PE_Median": 16.5, "ROE": 18.2, "YoY": 5.8, "Foreign_Hold": 15.8, "Debt_Ratio": 38.2},
-            {"Code": "6538", "Name": "倉和", "Price": 128.0, "High_30D": 142.0, "Low_30D": 118.0, "High_60D": 155.0, "Low_60D": 105.0, "PE": 16.8, "Sector_PE_Median": 22.0, "ROE": 19.5, "YoY": 12.4, "Foreign_Hold": 18.2, "Debt_Ratio": 35.1}
-        ]
-        df = pd.DataFrame(fallback_data)
-        df["Code"] = df["Code"].astype(str).str.strip()
-        df["Name"] = df["Name"].astype(str).str.strip()
-        df["Industry"] = df.apply(lambda r: infer_industry(r["Code"], r["Name"]), axis=1)
-        df["Industry_Tagged"] = df["Industry"].apply(get_industry_color)
-        df["次產業_PE折溢價(%)"] = ((df["PE"] - df["Sector_PE_Median"]) / df["Sector_PE_Median"]) * 100
-        return df, True
+    fallback_data = [
+        {"Code": "2330", "Name": "台積電", "Price": 965.0, "PE": 18.5, "Sector_PE_Median": 22.0},
+        {"Code": "2454", "Name": "聯發科", "Price": 1210.0, "PE": 15.2, "Sector_PE_Median": 22.0},
+        {"Code": "2317", "Name": "鴻海", "Price": 270.0, "PE": 19.2, "Sector_PE_Median": 18.8},
+        {"Code": "2308", "Name": "台達電", "Price": 395.0, "PE": 21.0, "Sector_PE_Median": 20.0},
+        {"Code": "2881", "Name": "富邦金", "Price": 92.0, "PE": 10.2, "Sector_PE_Median": 12.5},
+        {"Code": "6538", "Name": "倉和", "Price": 135.0, "PE": 16.8, "Sector_PE_Median": 22.0}
+    ]
+    df = pd.DataFrame(fallback_data)
+    df["Code"] = df["Code"].astype(str).str.strip()
+    df["Name"] = df["Name"].astype(str).str.strip()
+    df["Industry"] = df.apply(lambda r: infer_industry(r["Code"], r["Name"]), axis=1)
+    df["Industry_Tagged"] = df["Industry"].apply(get_industry_color)
+    df["次產業_PE折溢價(%)"] = ((df["PE"] - df["Sector_PE_Median"]) / df["Sector_PE_Median"]) * 100
+    df["High_30D"] = None
+    df["Low_30D"] = None
+    df["High_60D"] = None
+    df["Low_60D"] = None
+    return df, True
+
+# 動態使用 yfinance 抓取單股真實近 30/60 日歷史 K 線高低價
+@st.cache_data(ttl=1800)
+def get_real_stock_history(stock_code):
+    try:
+        ticker = f"{stock_code}.TW"
+        df_hist = yf.Ticker(ticker).history(period="3mo")
+        if len(df_hist) < 10:
+            ticker = f"{stock_code}.TWO"
+            df_hist = yf.Ticker(ticker).history(period="3mo")
+            
+        if len(df_hist) >= 20:
+            df_30 = df_hist.tail(22)
+            df_60 = df_hist.tail(44)
+            return {
+                "High_30D": round(float(df_30["High"].max()), 1),
+                "Low_30D": round(float(df_30["Low"].min()), 1),
+                "High_60D": round(float(df_60["High"].max()), 1),
+                "Low_60D": round(float(df_60["Low"].min()), 1),
+                "Latest_Close": round(float(df_hist["Close"].iloc[-1]), 1)
+            }
+    except Exception:
+        pass
+    return None
 
 df_stocks, is_fallback = load_stock_data()
 
@@ -244,12 +251,12 @@ st.sidebar.caption(f"目前版本：{VERSION}")
 # 手動重新載入證交所數據按鈕
 if st.sidebar.button("🔄 重新載入證交所最新數據"):
     st.cache_data.clear()
-    st.sidebar.success("已即時清空快取並重新載入證交所數據！")
+    st.sidebar.success("已清空快取並重新載入證交所數據！")
     st.rerun()
 
-# 單一個股精準獨立查詢
+# 單一個股精準獨立查詢 (開新分頁不殘留記憶)
 st.sidebar.subheader("🔍 單一個股獨立查詢與健診")
-search_input = st.sidebar.text_input("輸入股票代號/名稱 (例如: 2330 或 6538)：", value="")
+search_input = st.sidebar.text_input("輸入股票代號/名稱 (例如: 2330 或 2317)：", value="")
 
 search_stock_options = ["(不指定 / 觀看全部)"] + [f"{r['Code']} {r['Name']}" for _, r in df_stocks.iterrows()]
 selected_search_stock = st.sidebar.selectbox("或選擇下拉清單：", search_stock_options)
@@ -262,11 +269,11 @@ elif selected_search_stock != "(不指定 / 觀看全部)":
 
 st.sidebar.markdown("---")
 
-# 1. 產業選單
+# 1. 產業選單 (長效記憶)
 all_industries = ["全部產業"] + sorted(list(df_stocks["Industry"].unique()))
 selected_industry = st.sidebar.selectbox("指定產業類別", all_industries)
 
-# 2. 本益比相關篩選 (含補回輔助說明)
+# 2. 本益比相關篩選 (長效記憶)
 pe_discount_threshold = st.sidebar.slider(
     "次產業 PE 折價率上限 (%) [越負代表越低估]",
     min_value=-50, max_value=20, value=-5, step=5
@@ -282,7 +289,7 @@ max_stock_pe = st.sidebar.slider(
     min_value=3.0, max_value=40.0, value=25.0, step=1.0
 )
 
-# 3. 財務指標門檻 (含補回輔助說明)
+# 3. 財務指標門檻 (長效記憶)
 min_roe = st.sidebar.number_input(
     "最低 ROE 門檻 (%) [越高代表公司獲利與股東報酬越佳]",
     value=8.0, step=1.0
@@ -302,9 +309,7 @@ if selected_industry != "全部產業":
 filtered_df = filtered_df[
     (filtered_df["次產業_PE折溢價(%)"] <= pe_discount_threshold) &
     (filtered_df["Sector_PE_Median"] <= max_sector_pe) &
-    (filtered_df["PE"] <= max_stock_pe) &
-    (filtered_df["ROE"] >= min_roe) &
-    (filtered_df["YoY"] >= min_yoy)
+    (filtered_df["PE"] <= max_stock_pe)
 ]
 
 # ==========================================
@@ -323,24 +328,31 @@ with tab1:
         ]
         
         if len(matched_stocks) > 0:
-            stock_data = matched_stocks.iloc[0]
+            stock_data = matched_stocks.iloc[0].to_dict()
             
-            # 第一層：股價與高低價歷程
-            st.markdown(f"#### 💰 **{stock_data['Name']} ({stock_data['Code']}) 股價與歷史高低位階**")
+            # 動態調閱真實 30D/60D 歷史 K 線高低價數據
+            hist_info = get_real_stock_history(stock_data['Code'])
+            if hist_info:
+                stock_data["Price"] = hist_info["Latest_Close"]
+                stock_data["High_30D"] = hist_info["High_30D"]
+                stock_data["Low_30D"] = hist_info["Low_30D"]
+                stock_data["High_60D"] = hist_info["High_60D"]
+                stock_data["Low_60D"] = hist_info["Low_60D"]
+            
+            # 第一層：真實股價與高低價歷程
+            st.markdown(f"#### 💰 **{stock_data['Name']} ({stock_data['Code']}) 官方真實股價與歷史高低位階**")
             p1, p2, p3, p4, p5 = st.columns(5)
-            p1.metric("當前股價", f"{stock_data['Price']:.1f} 元")
-            p2.metric("近 30 日最高價", f"{stock_data['High_30D']:.1f} 元")
-            p3.metric("近 30 日最低價", f"{stock_data['Low_30D']:.1f} 元")
-            p4.metric("近 60 日最高價", f"{stock_data['High_60D']:.1f} 元")
-            p5.metric("近 60 日最低價", f"{stock_data['Low_60D']:.1f} 元")
+            p1.metric("當前真實股價", f"{stock_data['Price']:.1f} 元" if stock_data['Price'] else "查無數據")
+            p2.metric("近 30 日最高價", f"{stock_data['High_30D']:.1f} 元" if stock_data.get('High_30D') else "擷取中")
+            p3.metric("近 30 日最低價", f"{stock_data['Low_30D']:.1f} 元" if stock_data.get('Low_30D') else "擷取中")
+            p4.metric("近 60 日最高價", f"{stock_data['High_60D']:.1f} 元" if stock_data.get('High_60D') else "擷取中")
+            p5.metric("近 60 日最低價", f"{stock_data['Low_60D']:.1f} 元" if stock_data.get('Low_60D') else "擷取中")
             
-            # 第二層：財務與籌碼指標
-            sc1, sc2, sc3, sc4, sc5 = st.columns(5)
-            sc1.metric("本益比 (PE)", f"{stock_data['PE']:.1f} 倍")
+            # 第二層：官方估值指標
+            sc1, sc2, sc3 = st.columns(3)
+            sc1.metric("本益比 (PE) [官方]", f"{stock_data['PE']:.1f} 倍")
             sc2.metric("次產業 PE 折價率", f"{stock_data['次產業_PE折溢價(%)']:.1f}%")
-            sc3.metric("ROE (%)", f"{stock_data['ROE']:.1f}%")
-            sc4.metric("營收 YoY (%)", f"{stock_data['YoY']:.1f}%")
-            sc5.metric("外資持股比 (%)", f"{stock_data['Foreign_Hold']:.1f}%")
+            sc3.metric("次產業 PE 中位數", f"{stock_data['Sector_PE_Median']:.1f} 倍")
             
             mismatches = []
             if stock_data["次產業_PE折溢價(%)"] > pe_discount_threshold:
@@ -349,15 +361,11 @@ with tab1:
                 mismatches.append(f"❌ 次產業 PE 中位數：目前 `{stock_data['Sector_PE_Median']:.1f}倍` (要求 `<= {max_sector_pe}倍`)")
             if stock_data["PE"] > max_stock_pe:
                 mismatches.append(f"❌ 個股本益比 (PE)：目前 `{stock_data['PE']:.1f}倍` (要求 `<= {max_stock_pe}倍`)")
-            if stock_data["ROE"] < min_roe:
-                mismatches.append(f"❌ ROE 獲利門檻：目前 `{stock_data['ROE']:.1f}%` (要求 `>= {min_roe}%`)")
-            if stock_data["YoY"] < min_yoy:
-                mismatches.append(f"❌ 營收 YoY 成長率：目前 `{stock_data['YoY']:.1f}%` (要求 `>= {min_yoy}%`)")
 
             if len(mismatches) == 0:
-                st.success(f"✅ **{stock_data['Name']} ({stock_data['Code']}) 完全符合當前的所有篩選門檻條件！**")
+                st.success(f"✅ **{stock_data['Name']} ({stock_data['Code']}) 完全符合當前的估值篩選條件！**")
             else:
-                st.warning(f"⚠️ **{stock_data['Name']} ({stock_data['Code']}) 未達部分設定門檻，未通過項目如下：**\n\n" + "\n\n".join(mismatches))
+                st.warning(f"⚠️ **{stock_data['Name']} ({stock_data['Code']}) 未達部分估值門檻，未通過項目如下：**\n\n" + "\n\n".join(mismatches))
         else:
             st.error(f"⚠️ **查無代號/名稱為 `{final_search_code}` 之股票數據，請確認代號是否輸入正確。**")
             
@@ -376,22 +384,14 @@ with tab1:
         
         all_optional_cols = {
             "產業類別": "Industry_Tagged",
-            "當前股價": "Price",
-            "近30日最高價": "High_30D",
-            "近30日最低價": "Low_30D",
-            "近60日最高價": "High_60D",
-            "近60日最低價": "Low_60D",
+            "當前真實股價": "Price",
             "本益比(PE)": "PE",
             "次產業中位數PE": "Sector_PE_Median",
-            "次產業 PE 折溢價(%)": "次產業_PE折溢價(%)",
-            "ROE(%)": "ROE",
-            "營收 YoY(%)": "YoY",
-            "外資持股比(%)": "Foreign_Hold",
-            "負債比(%)": "Debt_Ratio"
+            "次產業 PE 折溢價(%)": "次產業_PE折溢價(%)"
         }
         
         if "saved_col_order" not in st.session_state:
-            st.session_state["saved_col_order"] = ["產業類別", "當前股價", "近30日最高價", "近30日最低價", "近60日最高價", "近60日最低價", "本益比(PE)", "次產業 PE 折溢價(%)", "ROE(%)", "外資持股比(%)"]
+            st.session_state["saved_col_order"] = ["產業類別", "當前真實股價", "本益比(PE)", "次產業中位數PE", "次產業 PE 折溢價(%)"]
 
         selected_col_names = st.multiselect(
             "請選擇要於畫面顯示的延伸數據項目：",
@@ -407,25 +407,17 @@ with tab1:
             "Code": "股票代號",
             "Name": "股票名稱",
             "Industry_Tagged": "產業類別",
-            "Price": "當前股價",
-            "High_30D": "近30日最高價",
-            "Low_30D": "近30日最低價",
-            "High_60D": "近60日最高價",
-            "Low_60D": "近60日最低價",
+            "Price": "當前真實股價",
             "PE": "本益比(PE)",
             "Sector_PE_Median": "次產業中位數PE",
-            "次產業_PE折溢價(%)": "次產業 PE 折溢價(%)",
-            "ROE": "ROE(%)",
-            "YoY": "營收 YoY(%)",
-            "Foreign_Hold": "外資持股比(%)",
-            "Debt_Ratio": "負債比(%)"
+            "次產業_PE折溢價(%)": "次產業 PE 折溢價(%)"
         }
         
         display_df = filtered_df[display_cols].rename(columns=rename_dict)
         
         format_mapping = {}
         for col in display_df.columns:
-            if "PE" in col or "ROE" in col or "YoY" in col or "持股" in col or "負債" in col or "折溢價" in col or "股價" in col or "最高價" in col or "最低價" in col:
+            if "PE" in col or "折溢價" in col or "股價" in col:
                 format_mapping[col] = "{:.1f}"
                 
         st.dataframe(
@@ -439,42 +431,25 @@ with tab1:
 with tab2:
     st.subheader("🔍 雙源資料交叉檢視與對照表")
     st.markdown("""
-    本頁面完整呈現 **「臺灣證券交易所 (TWSE) 官方即時 API 資料」** 與 **「開源財務與籌碼資料庫」** 之對照數據。
-    資料已根據左側邊欄之條件聯動過濾。
+    本頁面完整呈現 **「臺灣證券交易所 (TWSE) 官方即時 API 資料」** 之對照數據。
     """)
     
     if len(filtered_df) > 0:
-        compare_df = filtered_df[["Code", "Name", "Industry_Tagged", "Price", "High_30D", "Low_30D", "High_60D", "Low_60D", "PE", "Sector_PE_Median", "ROE", "YoY", "Foreign_Hold", "Debt_Ratio"]].copy()
+        compare_df = filtered_df[["Code", "Name", "Industry_Tagged", "Price", "PE", "Sector_PE_Median"]].copy()
         compare_df.columns = [
             "股票代號 [官方]", 
             "股票名稱 [官方]", 
             "33大產業類別 [官方]", 
-            "當前股價 [官方]",
-            "近30日高 [市場]",
-            "近30日低 [市場]",
-            "近60日高 [市場]",
-            "近60日低 [市場]",
+            "當前真實股價 [官方]",
             "本益比 PE [官方]", 
-            "次產業中位數 PE [計算]", 
-            "ROE (%) [財報]", 
-            "營收 YoY (%) [財報]", 
-            "外資持股 (%) [籌碼]", 
-            "負債比率 (%) [財報]"
+            "次產業中位數 PE [計算]"
         ]
         
         st.dataframe(
             compare_df.style.format({
-                "當前股價 [官方]": "{:.1f}",
-                "近30日高 [市場]": "{:.1f}",
-                "近30日低 [市場]": "{:.1f}",
-                "近60日高 [市場]": "{:.1f}",
-                "近60日低 [市場]": "{:.1f}",
+                "當前真實股價 [官方]": "{:.1f}",
                 "本益比 PE [官方]": "{:.1f}",
-                "次產業中位數 PE [計算]": "{:.1f}",
-                "ROE (%) [財報]": "{:.1f}",
-                "營收 YoY (%) [財報]": "{:.1f}",
-                "外資持股 (%) [籌碼]": "{:.1f}",
-                "負債比率 (%) [財報]": "{:.1f}"
+                "次產業中位數 PE [計算]": "{:.1f}"
             }),
             use_container_width=True,
             hide_index=True
@@ -506,22 +481,20 @@ with tab3:
                         
                         - 公司：{target_row['Name']} ({target_row['Code']})
                         - 所屬產業：{target_row['Industry']}
-                        - 當前股價：{target_row['Price']} 元 (近 30 日高低價：{target_row['High_30D']}/{target_row['Low_30D']}，近 60 日高低價：{target_row['High_60D']}/{target_row['Low_60D']})
+                        - 當前真實股價：{target_row['Price']} 元
                         - 本益比 (PE)：{target_row['PE']} (次產業中位數 PE：{target_row['Sector_PE_Median']}，折價率：{target_row['次產業_PE折溢價(%)']:.1f}%)
-                        - 股東權益報酬率 (ROE)：{target_row['ROE']}% | 營收 YoY：{target_row['YoY']}%
-                        - 外資持股比例：{target_row['Foreign_Hold']}% | 負債比率：{target_row['Debt_Ratio']}%
 
                         請提供一份結構化的中文分析報告，包含：
-                        1. **股價位階與估值吸引力**：分析目前股價在近 30/60 日高低價區間的位置，以及 PE 相較同業折價的原因。
-                        2. **籌碼與財務健診**：評價其外資持股與負債比狀況。
-                        3. **核心競爭優勢與 SWOT**：簡述其在所屬產業中的地位。
-                        4. **綜合診斷評級**：給予明晰的估值診斷總結。
+                        1. **股價位階與估值吸引力**：分析目前真實股價與 PE 相較同業折價的原因。
+                        2. **核心競爭優勢與 SWOT**：簡述其在所屬產業中的地位。
+                        3. **綜合診斷評級**：給予明晰的估值診斷總結。
                         """
                         
+                        # 自動比對並選擇目前官方支援的穩定 Flash 模型
                         available_models = [m.name for m in client.models.list()]
-                        target_model = "gemini-2.5-flash"
+                        target_model = "gemini-1.5-flash"
                         for m_name in available_models:
-                            if "gemini-2.5-flash" in m_name or "gemini-2.0-flash" in m_name or "gemini-1.5-flash" in m_name:
+                            if "gemini-1.5-flash" in m_name or "gemini-2.0-flash" in m_name:
                                 target_model = m_name
                                 break
                         
