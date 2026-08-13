@@ -14,13 +14,13 @@ except ImportError:
 
 # ==========================================
 # 版本資訊 (Version Info)
-# 版本別：v1.4.16
+# 版本別：v1.4.17
 # 更新日期：2026-08-13
 # 修改內容：
-# 1. 修正 Gemini 模型與端點：改用 v1 端點搭配 gemini-1.5-flash 模型，解決 gemini-pro 遭棄用之 404 錯誤。
+# 1. 修正 Gemini API 呼叫：使用 v1beta 端點搭配 gemini-2.5-flash 模型。
 # ==========================================
 
-VERSION = "v1.4.16"
+VERSION = "v1.4.17"
 UPDATE_DATE = "2026-08-13"
 
 st.set_page_config(
@@ -257,11 +257,11 @@ def get_real_stock_history(stock_code):
     return None
 
 def call_gemini_api(api_key, prompt):
-    """純 REST API 呼叫，使用 v1 端點搭配 gemini-1.5-flash 模型"""
+    """純 REST API 呼叫，使用 v1beta 端點搭配 gemini-2.5-flash 模型"""
     clean_key = str(api_key).strip().strip('"').strip("'")
     if not clean_key: return False, "API Key 為空"
     
-    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={clean_key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={clean_key}"
     try:
         res = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=15)
         if res.status_code == 200:
