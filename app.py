@@ -14,15 +14,14 @@ except ImportError:
 
 # ==========================================
 # 版本資訊 (Version Info)
-# 版本別：v1.4.13
+# 版本別：v1.4.14
 # 更新日期：2026-08-13
 # 修改內容：
-# 1. 恢復完整上市櫃資料來源：重新加入 TWSE 與 TPEx 官方 OpenAPI 串接。
-# 2. 導入強固 Fallback 機制：確保網路異常時自動載入基準標的，徹底解決掃描總數為 0 檔的問題。
-# 3. 強制 REST API：Gemini 呼叫維持使用 v1beta 端點，無 SDK 依賴。
+# 1. 修正 Gemini 404 錯誤：將模型名稱由 gemini-1.5-flash 改為 gemini-pro，確保 API Key 環境相容性。
+# 2. 修正 OpenRouter Llama 404 錯誤：將 model slug 由 meta-llama/llama-3.1-8b-instruct:free 更新為 meta-llama/llama-3.1-8b-instruct。
 # ==========================================
 
-VERSION = "v1.4.13"
+VERSION = "v1.4.14"
 UPDATE_DATE = "2026-08-13"
 
 st.set_page_config(
@@ -200,7 +199,7 @@ def load_stock_data():
     except Exception:
         pass
 
-    # 3. Fallback 機制：若 API 抓取失敗或數量不足，自動補入基準標的確保絕不為 0 檔
+    # 3. Fallback 機制
     if len(all_stocks) < 10:
         fallback_data = [
             {"Code": "2330", "Name": "台積電", "Price": 965.0, "PE": 18.5, "PB": 4.5, "Yield": 2.1, "Market": "上市"},
@@ -259,11 +258,11 @@ def get_real_stock_history(stock_code):
     return None
 
 def call_gemini_api(api_key, prompt):
-    """純 REST API 呼叫，強制使用 v1beta 路徑"""
+    """純 REST API 呼叫，改用 gemini-pro 模型確保相容性"""
     clean_key = str(api_key).strip().strip('"').strip("'")
     if not clean_key: return False, "API Key 為空"
     
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={clean_key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={clean_key}"
     try:
         res = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=15)
         if res.status_code == 200:
@@ -274,11 +273,11 @@ def call_gemini_api(api_key, prompt):
         return False, str(e)
 
 def call_openrouter_llama(api_key, prompt):
-    """動態爬取 OpenRouter"""
+    """動態爬取 OpenRouter，更新 Llama 模型 slug"""
     clean_key = str(api_key).strip().strip('"').strip("'")
     if not clean_key: return False, "API Key 為空"
     
-    target_model = "meta-llama/llama-3.1-8b-instruct:free"
+    target_model = "meta-llama/llama-3.1-8b-instruct"
     url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {"Authorization": f"Bearer {clean_key}", "Content-Type": "application/json"}
     payload = {"model": target_model, "messages": [{"role": "user", "content": prompt}]}
