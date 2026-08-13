@@ -17,8 +17,9 @@ except ImportError:
 # 版本別：v1.4.12
 # 更新日期：2026-08-13
 # 修改內容：
-# 1. 修復 KeyError：確保 load_stock_data 無論 API 狀態如何，都回傳擁有完整欄位的 DataFrame，避免 startup 崩潰。
-# 2. 強制 REST API：Gemini 呼叫維持使用 v1beta 端點，無 SDK 依賴。
+# 1. 完整無刪減版：提供完整程式碼供直接複製更新。
+# 2. 修復 KeyError：確保 load_stock_data 無論 API 狀態如何，都回傳擁有完整欄位的 DataFrame，避免 startup 崩潰。
+# 3. 強制 REST API：Gemini 呼叫維持使用 v1beta 端點，無 SDK 依賴。
 # ==========================================
 
 VERSION = "v1.4.12"
@@ -76,9 +77,11 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 st.title("📈 台股價值與潛力股智慧分析系統")
-st.caption(f"📌 版本別：{VERSION} | 🗓️ 更新日期：{UPDATE_DATE} | 結合官方 OpenAPI 與 AI 診斷")
+st.caption(f"📌 版本別：{VERSION} | 🗓️ 更新日期：{UPDATE_DATE} | 結合官方 OpenAPI、真實市場 K 線資料與 Gemini + Meta Llama 雙 AI 的同業估值診斷平台")
 
-# 產業對照表與基礎函數
+# ==========================================
+# 台股官方 33 大產業字典與色彩歸類對照表
+# ==========================================
 INDUSTRY_MAP = {
     "2330": "半導體業", "2454": "半導體業", "2303": "半導體業", "3711": "半導體業", "2379": "半導體業", "3034": "半導體業", "6538": "半導體業", "6415": "半導體業", "3583": "半導體業",
     "2382": "電腦及週邊設備業", "2357": "電腦及週邊設備業", "3231": "電腦及週邊設備業", "2301": "電腦及週邊設備業", "2324": "電腦及週邊設備業",
@@ -125,7 +128,6 @@ openrouter_key = st.secrets.get("OPENROUTER_API_KEY", os.getenv("OPENROUTER_API_
 
 @st.cache_data(ttl=3600)
 def load_stock_data():
-    """修正 KeyError：確保無論是否載入成功，都回傳結構完整的 DataFrame"""
     columns = ["Code", "Name", "Price", "PE", "PB", "Yield", "Market", "Industry", "Industry_Tagged", 
                "Sector_PE_Median", "次產業_PE折溢價(%)", "MA30", "MA60", "MA120", "Daily_Trend", "Weekly_Trend", "Monthly_Trend"]
     
@@ -143,13 +145,14 @@ def load_stock_data():
             df_pr["ClosingPrice"] = pd.to_numeric(df_pr["ClosingPrice"].astype(str).str.replace(",", ""), errors='coerce')
             m_twse = pd.merge(df_pe, df_pr[["Code", "ClosingPrice"]], on="Code", how="inner")
             for _, row in m_twse.iterrows():
+                pe_val = float(row["PEratio"]) if pd.notnull(row["PEratio"]) else 15.0
                 all_stocks.append({
                     "Code": row["Code"],
                     "Name": row["Name"].strip(),
                     "Price": row["ClosingPrice"],
-                    "PE": float(row["PEratio"]),
-                    "PB": float(row.get("PBratio", 0)),
-                    "Yield": float(row.get("DividendYield", 0)),
+                    "PE": pe_val,
+                    "PB": float(row.get("PBratio", 0)) if pd.notnull(row.get("PBratio")) else 1.2,
+                    "Yield": float(row.get("DividendYield", 0)) if pd.notnull(row.get("DividendYield")) else 0.0,
                     "Market": "上市"
                 })
     except: pass
@@ -168,8 +171,284 @@ def load_stock_data():
         df["Monthly_Trend"] = "⬆️"
         return df, False
     else:
-        # 回傳帶有欄位的空 DataFrame
         return pd.DataFrame(columns=columns), True
 
-# (後續 UI 邏輯維持不變...)
-# 此處為節省長度，請將上一版相同的 UI 邏輯（包含側邊欄、Tab 診斷區塊與 API 呼叫）接續於此
+@st.cache_data(ttl=1800)
+def get_real_stock_history(stock_code):
+    if not YFINANCE_AVAILABLE: return None
+    try:
+        ticker = f"{stock_code}.TW"
+        df_hist = yf.Ticker(ticker).history(period="6mo")
+        if len(df_hist) < 20:
+            ticker = f"{stock_code}.TWO"
+            df_hist = yf.Ticker(ticker).history(period="6mo")
+        if len(df_hist) >= 20:
+            c = df_hist["Close"]
+            return {
+                "High_30D": round(float(c.tail(22).max()), 1),
+                "Low_30D": round(float(c.tail(22).min()), 1),
+                "High_60D": round(float(c.tail(44).max()), 1),
+                "Low_60D": round(float(c.tail(44).min()), 1),
+                "Latest_Close": round(float(c.iloc[-1]), 1),
+                "MA30": round(float(c.tail(30).mean()), 1),
+                "MA60": round(float(c.tail(60).mean()), 1),
+                "MA120": round(float(c.tail(120).mean()), 1),
+                "Daily_Trend": "⬆️" if c.iloc[-1] >= c.iloc[-2] else "⬇️",
+                "Weekly_Trend": "⬆️" if c.iloc[-1] >= c.tail(5).mean() else "⬇️",
+                "Monthly_Trend": "⬆️" if c.iloc[-1] >= c.tail(20).mean() else "⬇️"
+            }
+    except: pass
+    return None
+
+def call_gemini_api(api_key, prompt):
+    """純 REST API 呼叫，強制使用 v1beta 路徑"""
+    clean_key = str(api_key).strip().strip('"').strip("'")
+    if not clean_key: return False, "API Key 為空"
+    
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={clean_key}"
+    try:
+        res = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=15)
+        if res.status_code == 200:
+            return True, res.json()['candidates'][0]['content']['parts'][0]['text']
+        else:
+            return False, f"HTTP {res.status_code}: {res.text}"
+    except Exception as e:
+        return False, str(e)
+
+def call_openrouter_llama(api_key, prompt):
+    """動態爬取 OpenRouter"""
+    clean_key = str(api_key).strip().strip('"').strip("'")
+    if not clean_key: return False, "API Key 為空"
+    
+    target_model = "meta-llama/llama-3.1-8b-instruct:free"
+    url = "https://openrouter.ai/api/v1/chat/completions"
+    headers = {"Authorization": f"Bearer {clean_key}", "Content-Type": "application/json"}
+    payload = {"model": target_model, "messages": [{"role": "user", "content": prompt}]}
+    
+    try:
+        res = requests.post(url, json=payload, headers=headers, timeout=20)
+        if res.status_code == 200:
+            return True, res.json()['choices'][0]['message']['content']
+        return False, f"Error {res.status_code}: {res.text}"
+    except Exception as e:
+        return False, str(e)
+
+# 載入
+df_stocks, is_fallback = load_stock_data()
+
+# 參數 Session State
+qp = st.query_params
+if "ind_val" not in st.session_state: st.session_state["ind_val"] = qp.get("ind", "全部產業")
+if "pe_disc_val" not in st.session_state: st.session_state["pe_disc_val"] = int(qp.get("pe_disc", -5))
+if "sec_pe_val" not in st.session_state: st.session_state["sec_pe_val"] = float(qp.get("sec_pe", 30.0))
+if "max_pe_val" not in st.session_state: st.session_state["max_pe_val"] = float(qp.get("max_pe", 25.0))
+if "roe_val" not in st.session_state: st.session_state["roe_val"] = float(qp.get("roe", 8.0))
+if "yoy_val" not in st.session_state: st.session_state["yoy_val"] = float(qp.get("yoy", -5.0))
+
+# 側邊欄
+st.sidebar.header("⚙️ 篩選條件設定")
+st.sidebar.caption(f"目前版本：{VERSION}")
+
+if st.sidebar.button("🔄 重新載入證交所最新數據"):
+    st.cache_data.clear()
+    st.sidebar.success("已清空快取並重新載入證交所數據！")
+    st.rerun()
+
+st.sidebar.subheader("🔍 單一個股獨立查詢與健診")
+search_input = st.sidebar.text_input("輸入股票代號/名稱 (例如: 2330 或 2641)：", value="")
+
+search_stock_options = ["(不指定 / 觀看全部)"] + ([f"{r['Code']} {r['Name']}" for _, r in df_stocks.iterrows()] if not df_stocks.empty else [])
+selected_search_stock = st.sidebar.selectbox("或選擇下拉清單：", search_stock_options)
+
+final_search_code = ""
+if search_input.strip():
+    final_search_code = search_input.strip().split()[0]
+elif selected_search_stock != "(不指定 / 觀看全部)":
+    final_search_code = selected_search_stock.split()[0]
+
+st.sidebar.markdown("---")
+
+available_industries = sorted(list(df_stocks["Industry"].unique())) if not df_stocks.empty and "Industry" in df_stocks.columns else []
+all_industries = ["全部產業"] + available_industries
+ind_index = all_industries.index(st.session_state["ind_val"]) if st.session_state["ind_val"] in all_industries else 0
+
+selected_industry = st.sidebar.selectbox("指定產業類別", all_industries, index=ind_index, key="sb_ind")
+
+pe_discount_threshold = st.sidebar.slider("次產業 PE 折價率上限 (%) [越負代表越低估]", -50, 20, st.session_state["pe_disc_val"], 5, key="sb_pe_disc")
+max_sector_pe = st.sidebar.slider("次產業 PE 中位數上限 (倍)", 5.0, 50.0, st.session_state["sec_pe_val"], 1.0, key="sb_sec_pe")
+max_stock_pe = st.sidebar.slider("個股 PE 絕對值上限 (倍)", 3.0, 40.0, st.session_state["max_pe_val"], 1.0, key="sb_max_pe")
+min_roe = st.sidebar.number_input("最低 ROE 門檻 (%)", value=st.session_state["roe_val"], step=1.0, key="sb_roe")
+min_yoy = st.sidebar.number_input("近12個月營收 YoY 成長率門檻 (%)", value=st.session_state["yoy_val"], step=1.0, key="sb_yoy")
+
+st.session_state["ind_val"] = selected_industry
+st.session_state["pe_disc_val"] = pe_discount_threshold
+st.session_state["sec_pe_val"] = max_sector_pe
+st.session_state["max_pe_val"] = max_stock_pe
+st.session_state["roe_val"] = min_roe
+st.session_state["yoy_val"] = min_yoy
+
+st.sidebar.markdown("---")
+btn_run_filter = st.sidebar.button("🔍 套用條件並開始篩選", type="primary", use_container_width=True)
+
+if "filter_executed" not in st.session_state:
+    st.session_state["filter_executed"] = False
+
+if btn_run_filter:
+    st.session_state["filter_executed"] = True
+
+filtered_df = df_stocks.copy()
+if not filtered_df.empty:
+    if selected_industry != "全部產業":
+        filtered_df = filtered_df[filtered_df["Industry"] == selected_industry]
+    filtered_df = filtered_df[
+        (filtered_df["次產業_PE折溢價(%)"] <= pe_discount_threshold) &
+        (filtered_df["Sector_PE_Median"] <= max_sector_pe) &
+        (filtered_df["PE"] <= max_stock_pe)
+    ]
+
+# ==========================================
+# 主要頁面頁籤 (Main Tabs)
+# ==========================================
+tab1, tab2, tab3 = st.tabs(["📊 篩選總覽與核心數據", "🔍 雙源資料對照表", "🧠 Gemini & Llama 雙 AI 診斷"])
+
+with tab1:
+    if final_search_code and not df_stocks.empty:
+        st.subheader("🎯 單一個股獨立健診與數據看板")
+        clean_search_target = str(final_search_code).strip()
+        matched_stocks = df_stocks[
+            (df_stocks["Code"].str.lower() == clean_search_target.lower()) | 
+            (df_stocks["Name"].str.lower().str.contains(clean_search_target.lower(), na=False))
+        ]
+        if len(matched_stocks) > 0:
+            stock_data = matched_stocks.iloc[0].to_dict()
+            hist_info = get_real_stock_history(stock_data['Code'])
+            if hist_info:
+                stock_data["Price"] = hist_info["Latest_Close"]
+                stock_data["High_30D"] = hist_info["High_30D"]
+                stock_data["Low_30D"] = hist_info["Low_30D"]
+                stock_data["High_60D"] = hist_info["High_60D"]
+                stock_data["Low_60D"] = hist_info["Low_60D"]
+            
+            st.markdown(f"#### 💰 **{stock_data['Name']} ({stock_data['Code']}) 官方真實股價與歷史高低位階**")
+            p1, p2, p3, p4, p5 = st.columns(5)
+            p1.metric("當前真實股價", f"{stock_data['Price']:.1f} 元" if stock_data['Price'] and stock_data['Price'] > 0 else "擷取中")
+            p2.metric("近 30 日最高價", f"{stock_data.get('High_30D', 0):.1f} 元")
+            p3.metric("近 30 日最低價", f"{stock_data.get('Low_30D', 0):.1f} 元")
+            p4.metric("近 60 日最高價", f"{stock_data.get('High_60D', 0):.1f} 元")
+            p5.metric("近 60 日最低價", f"{stock_data.get('Low_60D', 0):.1f} 元")
+        st.markdown("---")
+
+    col1, col2, col3 = st.columns(3)
+    if not st.session_state["filter_executed"]:
+        col1.metric("上市櫃掃描總數", "---")
+        col2.metric("符合條件潛力股", "---")
+        col3.metric("平均 PE 折價率", "---")
+        st.info("👈 **請於左側邊欄確認或調整篩選條件後，點擊『🔍 套用條件並開始篩選』按鈕即可開始計算並產出潛力股清單！**")
+    else:
+        col1.metric("上市櫃掃描總數", f"{len(df_stocks)} 檔")
+        col2.metric("符合條件潛力股", f"{len(filtered_df)} 檔")
+        avg_discount = filtered_df["次產業_PE折溢價(%)"].mean() if len(filtered_df) > 0 else 0
+        col3.metric("平均 PE 折價率", f"{avg_discount:.1f}%")
+
+        st.subheader("🎯 Qualified Stock Targets (合格標的清單)")
+        if len(filtered_df) > 0:
+            for idx, r in filtered_df.iterrows():
+                h_info = get_real_stock_history(r["Code"])
+                if h_info:
+                    if r["Price"] == 0.0 or pd.isnull(r["Price"]):
+                        filtered_df.at[idx, "Price"] = h_info["Latest_Close"]
+                    filtered_df.at[idx, "MA30"] = h_info["MA30"]
+                    filtered_df.at[idx, "MA60"] = h_info["MA60"]
+                    filtered_df.at[idx, "MA120"] = h_info["MA120"]
+                    filtered_df.at[idx, "Daily_Trend"] = h_info["Daily_Trend"]
+                    filtered_df.at[idx, "Weekly_Trend"] = h_info["Weekly_Trend"]
+                    filtered_df.at[idx, "Monthly_Trend"] = h_info["Monthly_Trend"]
+            
+            all_optional_cols = {
+                "產業類別": "Industry_Tagged", "當前真實股價": "Price", "本益比(PE)": "PE",
+                "股價淨值比(PB)": "PB", "殖利率(%)": "Yield", "次產業中位數PE": "Sector_PE_Median",
+                "次產業 PE 折溢價(%)": "次產業_PE折溢價(%)", "近 30 日均價": "MA30",
+                "近 60 日均價": "MA60", "近 120 日均價": "MA120", "日線趨勢": "Daily_Trend",
+                "週線趨勢": "Weekly_Trend", "月線趨勢": "Monthly_Trend"
+            }
+            display_cols = ["Code", "Name"] + list(all_optional_cols.values())
+            rename_dict = {"Code": "股票代號", "Name": "股票名稱", **{v: k for k, v in all_optional_cols.items()}}
+            display_df = filtered_df[display_cols].rename(columns=rename_dict)
+            st.dataframe(display_df, use_container_width=True, hide_index=True)
+        else:
+            st.warning("尚無符合當前條件的標的，請適度放寬側邊欄的篩選條件。")
+
+with tab2:
+    st.subheader("🔍 雙源資料交叉檢視與對照表")
+    if not st.session_state["filter_executed"]:
+        st.info("👈 請先於左側邊欄點擊『🔍 套用條件並開始篩選』按鈕。")
+    elif len(filtered_df) > 0:
+        compare_df = filtered_df[["Code", "Name", "Industry_Tagged", "Price", "PE", "PB", "Yield", "Sector_PE_Median"]].copy()
+        compare_df.columns = ["股票代號 [官方]", "股票名稱 [官方]", "33大產業類別 [官方]", "當前真實股價 [官方]", "本益比 PE [官方]", "股價淨值比 PB [官方]", "殖利率 (%) [官方]", "次產業中位數 PE [計算]"]
+        st.dataframe(compare_df, use_container_width=True, hide_index=True)
+    else:
+        st.warning("目前篩選條件下無符合標的。")
+
+with tab3:
+    st.subheader("🧠 Gemini & Meta Llama 雙 AI 智慧白話深度個股診斷")
+    diagnostic_df = filtered_df.copy()
+    if final_search_code and not df_stocks.empty:
+        clean_target = str(final_search_code).strip().lower()
+        extra_match = df_stocks[
+            (df_stocks["Code"].str.lower() == clean_target) | 
+            (df_stocks["Name"].str.lower().str.contains(clean_target, na=False))
+        ]
+        if len(extra_match) > 0:
+            diagnostic_df = pd.concat([diagnostic_df, extra_match]).drop_duplicates(subset=["Code"])
+
+    if diagnostic_df.empty:
+        st.info("👈 當前篩選條件下尚無合格標的。請調整側邊欄條件並點擊按鈕，或於左側獨立查詢框輸入個股代號。")
+    else:
+        target_options = [f"{row['Code']} {row['Name']}" for _, row in diagnostic_df.iterrows()]
+        selected_stock_str = st.selectbox("請選擇欲診斷的合格低估標的：", target_options)
+        
+        if st.button("🚀 一鍵生成 Gemini + Llama 雙 AI 白話對照報告"):
+            stock_code = selected_stock_str.split()[0]
+            target_row = df_stocks[df_stocks["Code"] == stock_code].iloc[0]
+            
+            prompt = f"""
+            你是一位說話親切、條理清晰的股票投資助手。請用一般非專業人士、一般社會大眾都能輕鬆看懂的「通俗白話文」，為我解讀以下股票：
+            
+            - 股票名稱：{target_row['Name']} ({target_row['Code']})
+            - 所屬產業：{target_row['Industry']}
+            - 目前股價：{target_row['Price']} 元
+            - 本益比：{target_row['PE']} 倍 (同產業平均大約是：{target_row['Sector_PE_Median']} 倍，這代表股價比同業便宜了約 {abs(target_row['次產業_PE折溢價(%)']):.1f}%)
+
+            請提供一份白話簡明、條列清晰的分析報告：
+            1. 💡 **價格便宜程度說明**：用簡單口語說明這檔股票價格比同業便宜還是貴？為什麼會比較便宜？
+            2. 🏢 **公司主要靠什麼賺錢**：用一兩句話簡單介紹這家公司在做什麼業務、有什麼優勢？
+            3. ⚖️ **白話總評與注意事項**：給一般投資人的溫馨提示，買進這檔股票有什麼好處與需要特別注意的風險。
+            """
+            
+            col_gemini, col_llama = st.columns(2)
+            with col_gemini:
+                st.markdown("### 🧠 Gemini AI 白話分析報告")
+                if not gemini_key:
+                    st.error("❌ 未偵測到 Gemini API 金鑰。請於 Secrets 設定 `GEMINI_API_KEY`。")
+                else:
+                    with st.spinner("Gemini 正在產生白話報告..."):
+                        g_success, g_res = call_gemini_api(gemini_key, prompt)
+                        if g_success:
+                            st.markdown(g_res)
+                        else:
+                            st.error(f"❌ Gemini 回應失敗：\n`{g_res}`")
+                            
+            with col_llama:
+                st.markdown("### 🦙 Meta Llama 3 (OpenRouter) 白話分析報告")
+                if not openrouter_key:
+                    st.error("❌ 未偵測到 OpenRouter API 金鑰。請於 Secrets 設定 `OPENROUTER_API_KEY`。")
+                else:
+                    with st.spinner("Meta Llama 3 正在產生白話報告..."):
+                        l_success, l_res = call_openrouter_llama(openrouter_key, prompt)
+                        if l_success:
+                            st.markdown(l_res)
+                        else:
+                            st.error(f"❌ Llama 回應失敗：\n`{l_res}`")
+
+st.markdown("---")
+st.caption(f"系統版本：{VERSION} | 最後更新日期：{UPDATE_DATE} | 資料來源：臺灣證券交易所、櫃買中心與公開資訊觀測站")
