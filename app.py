@@ -14,13 +14,14 @@ except ImportError:
 
 # ==========================================
 # 版本資訊 (Version Info)
-# 版本別：v1.4.19
+# 版本別：v1.4.20
 # 更新日期：2026-08-13
 # 修改內容：
-# 1. 修正 OpenRouter Llama 亂碼與退化迴圈問題：在 payload 加入 temperature=0.3、max_tokens 及繁體中文 system prompt 約束。
+# 1. 修正 Gemini API 逾時：將 timeout 調高至 60 秒。
+# 2. 恢復介面說明：為側邊欄所有篩選條件加入 help 數值解釋說明。
 # ==========================================
 
-VERSION = "v1.4.19"
+VERSION = "v1.4.20"
 UPDATE_DATE = "2026-08-13"
 
 st.set_page_config(
@@ -257,13 +258,13 @@ def get_real_stock_history(stock_code):
     return None
 
 def call_gemini_api(api_key, prompt):
-    """純 REST API 呼叫，使用 v1beta 端點搭配 gemini-3.5-flash 模型"""
+    """純 REST API 呼叫，timeout 調高至 60 秒"""
     clean_key = str(api_key).strip().strip('"').strip("'")
     if not clean_key: return False, "API Key 為空"
     
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key={clean_key}"
     try:
-        res = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=15)
+        res = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=60)
         if res.status_code == 200:
             return True, res.json()['candidates'][0]['content']['parts'][0]['text']
         else:
@@ -272,7 +273,7 @@ def call_gemini_api(api_key, prompt):
         return False, str(e)
 
 def call_openrouter_llama(api_key, prompt):
-    """動態爬取 OpenRouter，加入穩定參數與繁體中文系統提示詞避免生成亂碼迴圈"""
+    """動態爬取 OpenRouter，加入穩定參數與繁體中文系統提示詞"""
     clean_key = str(api_key).strip().strip('"').strip("'")
     if not clean_key: return False, "API Key 為空"
     
@@ -338,11 +339,26 @@ ind_index = all_industries.index(st.session_state["ind_val"]) if st.session_stat
 
 selected_industry = st.sidebar.selectbox("指定產業類別", all_industries, index=ind_index, key="sb_ind")
 
-pe_discount_threshold = st.sidebar.slider("次產業 PE 折價率上限 (%) [越負代表越低估]", -50, 20, st.session_state["pe_disc_val"], 5, key="sb_pe_disc")
-max_sector_pe = st.sidebar.slider("次產業 PE 中位數上限 (倍)", 5.0, 50.0, st.session_state["sec_pe_val"], 1.0, key="sb_sec_pe")
-max_stock_pe = st.sidebar.slider("個股 PE 絕對值上限 (倍)", 3.0, 40.0, st.session_state["max_pe_val"], 1.0, key="sb_max_pe")
-min_roe = st.sidebar.number_input("最低 ROE 門檻 (%)", value=st.session_state["roe_val"], step=1.0, key="sb_roe")
-min_yoy = st.sidebar.number_input("近12個月營收 YoY 成長率門檻 (%)", value=st.session_state["yoy_val"], step=1.0, key="sb_yoy")
+pe_discount_threshold = st.sidebar.slider(
+    "次產業 PE 折價率上限 (%) [越負代表越低估]", -50, 20, st.session_state["pe_disc_val"], 5, key="sb_pe_disc",
+    help="數值越負，代表該股本益比相對於同產業中位數越低估。"
+)
+max_sector_pe = st.sidebar.slider(
+    "次產業 PE 中位數上限 (倍)", 5.0, 50.0, st.session_state["sec_pe_val"], 1.0, key="sb_sec_pe",
+    help="篩選產業PE中位數在此數值以下的產業。"
+)
+max_stock_pe = st.sidebar.slider(
+    "個股 PE 絕對值上限 (倍)", 3.0, 40.0, st.session_state["max_pe_val"], 1.0, key="sb_max_pe",
+    help="篩選個股PE在此數值以下的標的。"
+)
+min_roe = st.sidebar.number_input(
+    "最低 ROE 門檻 (%)", value=st.session_state["roe_val"], step=1.0, key="sb_roe",
+    help="篩選ROE大於此數值的公司。"
+)
+min_yoy = st.sidebar.number_input(
+    "近12個月營收 YoY 成長率門檻 (%)", value=st.session_state["yoy_val"], step=1.0, key="sb_yoy",
+    help="篩選年營收成長率大於此數值的公司。"
+)
 
 st.session_state["ind_val"] = selected_industry
 st.session_state["pe_disc_val"] = pe_discount_threshold
