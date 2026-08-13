@@ -1,5 +1,5 @@
 streamlit
 pandas
-finmind
+requests
 google-genai
-openpyxl
+yfinance
