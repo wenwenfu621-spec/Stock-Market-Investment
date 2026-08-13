@@ -21,14 +21,14 @@ except ImportError:
 
 # ==========================================
 # 版本資訊 (Version Info)
-# 版本別：v1.4.6
+# 版本別：v1.4.8
 # 更新日期：2026-08-13
 # 修改內容：
-# 1. 徹底解決 Gemini 404：全面更新模型清單，優先採用 gemini-2.5-flash 與 gemini-1.5-flash 雙軌輪詢。
-# 2. 完全保留已成功運作的 OpenRouter 動態免費模型抓取機制與 13 個延伸數據欄位。
+# 1. 徹底修復 Gemini 404：完全移除不穩定的 REST 備援端點，改由官方 google-generativeai SDK 統一處理路由。
+# 2. 完全保留 13 個延伸數據欄位、趨勢指標與 OpenRouter 動態免費模型抓取功能。
 # ==========================================
 
-VERSION = "v1.4.6"
+VERSION = "v1.4.8"
 UPDATE_DATE = "2026-08-13"
 
 st.set_page_config(
@@ -337,49 +337,28 @@ def get_real_stock_history(stock_code):
     return None
 
 def call_gemini_api(api_key, prompt):
-    """徹底修復 Gemini 404：優先使用 gemini-2.5-flash 與 gemini-1.5-flash 雙軌 REST 與 SDK 輪詢"""
+    """完全捨棄易出錯的 REST 直連，強制使用官方 google-generativeai SDK 穩定呼叫"""
     clean_key = str(api_key).strip().strip('"').strip("'")
     if not clean_key:
         return False, "GEMINI_API_KEY 為空，請檢查 Secrets 設定。"
-
-    # 1. 優先透過官方 SDK 進行多模型嘗試
-    if GENAI_LEGACY_AVAILABLE:
-        try:
-            genai_legacy.configure(api_key=clean_key)
-            for m_name in ['gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-1.5-pro']:
-                try:
-                    m = genai_legacy.GenerativeModel(m_name)
-                    res = m.generate_content(prompt)
-                    if res and hasattr(res, 'text') and res.text:
-                        return True, res.text
-                except Exception:
-                    continue
-        except Exception:
-            pass
-
-    # 2. REST API 雙軌輪詢：gemini-2.5-flash 與 gemini-1.5-flash
-    headers = {"Content-Type": "application/json"}
-    payload = {"contents": [{"parts": [{"text": prompt}]}]}
-    
-    last_err = ""
-    for model_name in ['gemini-2.5-flash', 'gemini-1.5-flash']:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={clean_key}"
-        try:
-            res = requests.post(url, json=payload, headers=headers, timeout=15)
-            if res.status_code == 200:
-                data = res.json()
-                text = data.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '')
-                if text:
-                    return True, text
-            else:
-                last_err = f"HTTP {res.status_code}: {res.text}"
-        except Exception as e:
-            last_err = str(e)
-            
-    return False, f"Gemini 連線失敗: {last_err}"
+    if not GENAI_LEGACY_AVAILABLE:
+        return False, "未安裝 google-generativeai SDK。"
+    try:
+        genai_legacy.configure(api_key=clean_key)
+        for m_name in ['gemini-1.5-flash', 'gemini-1.5-pro']:
+            try:
+                model = genai_legacy.GenerativeModel(m_name)
+                res = model.generate_content(prompt)
+                if res and hasattr(res, 'text') and res.text:
+                    return True, res.text
+            except Exception:
+                continue
+        return False, "所有 Gemini 模型呼叫失敗，請檢查 Key 權限。"
+    except Exception as e:
+        return False, f"Gemini SDK 初始化失敗: {str(e)}"
 
 def call_openrouter_llama(api_key, prompt):
-    """動態爬取 OpenRouter 當下存活的免費模型 ID（已驗證成功）"""
+    """動態爬取 OpenRouter 當下存活的免費模型 ID"""
     clean_key = str(api_key).strip().strip('"').strip("'")
     if not clean_key:
         return False, "OPENROUTER_API_KEY 為空，請檢查 Secrets 設定。"
@@ -661,7 +640,7 @@ with tab1:
                 "MA60": "近 60 日均價",
                 "MA120": "近 120 日均價",
                 "Daily_Trend": "日線趨勢",
-                "Weekly_Trend": "週線趨勢",
+                "週線趨勢": "週線趨勢",
                 "Monthly_Trend": "月線趨勢"
             }
             
