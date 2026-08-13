@@ -5,7 +5,7 @@ import os
 import base64
 from google import genai
 
-# 安全載入 yfinance
+# 安全載入 yfinance (防護機制)
 try:
     import yfinance as yf
     YFINANCE_AVAILABLE = True
@@ -15,15 +15,16 @@ except ImportError:
 
 # ==========================================
 # 版本資訊 (Version Info)
-# 版本別：v1.3.2
+# 版本別：v1.3.4
 # 更新日期：2026-08-13
 # 修改內容：
-# 1. 修復 Gemini AI 404 報錯 (修正 SDK 模型名稱格式與前綴剝離)。
-# 2. 新增左側篩選參數 URL 網址持久化記憶 (開啟新視窗可保留設定數值)。
-# 3. 新增「🔍 套用條件並開始篩選」手動觸發按鈕 (開新視窗預設不自動跑清單)。
+# 1. 徹底解決 Gemini AI 404 模型報錯問題 (修復 SDK 模型名稱格式)。
+# 2. 修復滑桿與 +/- 數字微調按鈕，調整一次即刻精準生效且同步記憶。
+# 3. 支援調整參數時右側股票清單與統計數據即時動態連動更新。
+# 4. 完整保留「上市櫃掃描總數、符合條件潛力股、平均 PE 折價率」核心指標看板與既有功能。
 # ==========================================
 
-VERSION = "v1.3.2"
+VERSION = "v1.3.4"
 UPDATE_DATE = "2026-08-13"
 
 st.set_page_config(
@@ -209,6 +210,7 @@ def load_stock_data():
         {"Code": "2317", "Name": "鴻海", "Price": 270.0, "PE": 19.2, "Sector_PE_Median": 18.8},
         {"Code": "2308", "Name": "台達電", "Price": 395.0, "PE": 21.0, "Sector_PE_Median": 20.0},
         {"Code": "2881", "Name": "富邦金", "Price": 92.0, "PE": 10.2, "Sector_PE_Median": 12.5},
+        {"Code": "1102", "Name": "亞泥", "Price": 42.5, "PE": 12.8, "Sector_PE_Median": 16.0},
         {"Code": "2031", "Name": "新光鋼", "Price": 62.5, "PE": 11.5, "Sector_PE_Median": 18.0},
         {"Code": "6538", "Name": "倉和", "Price": 135.0, "PE": 16.8, "Sector_PE_Median": 22.0}
     ]
@@ -252,16 +254,22 @@ def get_real_stock_history(stock_code):
 df_stocks, is_fallback = load_stock_data()
 
 # ==========================================
-# URL Query Params 長效記憶讀取
+# 參數 Session State 記憶載入 (解鎖單次即時生效)
 # ==========================================
-query_params = st.query_params
+qp = st.query_params
 
-default_ind = query_params.get("ind", "全部產業")
-default_pe_disc = int(query_params.get("pe_disc", -5))
-default_max_sec_pe = float(query_params.get("sec_pe", 30.0))
-default_max_pe = float(query_params.get("max_pe", 25.0))
-default_min_roe = float(query_params.get("roe", 8.0))
-default_min_yoy = float(query_params.get("yoy", -5.0))
+if "ind_val" not in st.session_state:
+    st.session_state["ind_val"] = qp.get("ind", "全部產業")
+if "pe_disc_val" not in st.session_state:
+    st.session_state["pe_disc_val"] = int(qp.get("pe_disc", -5))
+if "sec_pe_val" not in st.session_state:
+    st.session_state["sec_pe_val"] = float(qp.get("sec_pe", 30.0))
+if "max_pe_val" not in st.session_state:
+    st.session_state["max_pe_val"] = float(qp.get("max_pe", 25.0))
+if "roe_val" not in st.session_state:
+    st.session_state["roe_val"] = float(qp.get("roe", 8.0))
+if "yoy_val" not in st.session_state:
+    st.session_state["yoy_val"] = float(qp.get("yoy", -5.0))
 
 # ==========================================
 # 側邊欄設定 (Sidebar)
@@ -275,7 +283,7 @@ if st.sidebar.button("🔄 重新載入證交所最新數據"):
     st.rerun()
 
 st.sidebar.subheader("🔍 單一個股獨立查詢與健診")
-search_input = st.sidebar.text_input("輸入股票代號/名稱 (例如: 2330 或 2031)：", value="")
+search_input = st.sidebar.text_input("輸入股票代號/名稱 (例如: 2330 或 1102)：", value="")
 
 search_stock_options = ["(不指定 / 觀看全部)"] + [f"{r['Code']} {r['Name']}" for _, r in df_stocks.iterrows()]
 selected_search_stock = st.sidebar.selectbox("或選擇下拉清單：", search_stock_options)
@@ -289,36 +297,43 @@ elif selected_search_stock != "(不指定 / 觀看全部)":
 st.sidebar.markdown("---")
 
 all_industries = ["全部產業"] + sorted(list(df_stocks["Industry"].unique()))
-ind_index = all_industries.index(default_ind) if default_ind in all_industries else 0
+ind_index = all_industries.index(st.session_state["ind_val"]) if st.session_state["ind_val"] in all_industries else 0
 
-selected_industry = st.sidebar.selectbox("指定產業類別", all_industries, index=ind_index)
+selected_industry = st.sidebar.selectbox("指定產業類別", all_industries, index=ind_index, key="sb_ind")
 
 pe_discount_threshold = st.sidebar.slider(
     "次產業 PE 折價率上限 (%) [越負代表越低估]",
-    min_value=-50, max_value=20, value=default_pe_disc, step=5
+    min_value=-50, max_value=20, value=st.session_state["pe_disc_val"], step=5, key="sb_pe_disc"
 )
 
 max_sector_pe = st.sidebar.slider(
     "次產業 PE 中位數上限 (倍) [越低代表整體產業估值越平實]",
-    min_value=5.0, max_value=50.0, value=default_max_sec_pe, step=1.0
+    min_value=5.0, max_value=50.0, value=st.session_state["sec_pe_val"], step=1.0, key="sb_sec_pe"
 )
 
 max_stock_pe = st.sidebar.slider(
     "個股 PE 絕對值上限 (倍) [越低代表購買價格越便宜]",
-    min_value=3.0, max_value=40.0, value=default_max_pe, step=1.0
+    min_value=3.0, max_value=40.0, value=st.session_state["max_pe_val"], step=1.0, key="sb_max_pe"
 )
 
 min_roe = st.sidebar.number_input(
     "最低 ROE 門檻 (%) [越高代表公司獲利與股東報酬越佳]",
-    value=default_min_roe, step=1.0
+    value=st.session_state["roe_val"], step=1.0, key="sb_roe"
 )
 
 min_yoy = st.sidebar.number_input(
     "近12個月營收 YoY 成長率門檻 (%) [越高代表營收成長動能越強]",
-    value=default_min_yoy, step=1.0
+    value=st.session_state["yoy_val"], step=1.0, key="sb_yoy"
 )
 
-# 保存記憶至 URL
+# 即時將最新狀態寫回 Session State 與 URL
+st.session_state["ind_val"] = selected_industry
+st.session_state["pe_disc_val"] = pe_discount_threshold
+st.session_state["sec_pe_val"] = max_sector_pe
+st.session_state["max_pe_val"] = max_stock_pe
+st.session_state["roe_val"] = min_roe
+st.session_state["yoy_val"] = min_yoy
+
 st.query_params["ind"] = selected_industry
 st.query_params["pe_disc"] = str(pe_discount_threshold)
 st.query_params["sec_pe"] = str(max_sector_pe)
@@ -326,7 +341,7 @@ st.query_params["max_pe"] = str(max_stock_pe)
 st.query_params["roe"] = str(min_roe)
 st.query_params["yoy"] = str(min_yoy)
 
-# 新增手動篩選按鈕
+# 按鈕與動態更新控制
 st.sidebar.markdown("---")
 btn_run_filter = st.sidebar.button("🔍 套用條件並開始篩選", type="primary", use_container_width=True)
 
@@ -336,7 +351,7 @@ if "filter_executed" not in st.session_state:
 if btn_run_filter:
     st.session_state["filter_executed"] = True
 
-# 資料過濾邏輯
+# 即時動態過濾資料庫
 filtered_df = df_stocks.copy()
 
 if selected_industry != "全部產業":
@@ -404,15 +419,16 @@ with tab1:
             
         st.markdown("---")
 
-    if not st.session_state["filter_executed"]:
-        st.info("👈 **請於左側邊欄確認或調整篩選條件後，點擊『🔍 套用條件並開始篩選』按鈕即可產出最新潛力股清單！**")
-    else:
-        col1, col2, col3 = st.columns(3)
-        col1.metric("上市櫃掃描總數", f"{len(df_stocks)} 檔")
-        col2.metric("符合條件潛力股", f"{len(filtered_df)} 檔")
-        avg_discount = filtered_df["次產業_PE折溢價(%)"].mean() if len(filtered_df) > 0 else 0
-        col3.metric("平均 PE 折價率", f"{avg_discount:.1f}%")
+    # 復原問題 4：頂部三大核心數據指標看板常駐顯示
+    col1, col2, col3 = st.columns(3)
+    col1.metric("上市櫃掃描總數", f"{len(df_stocks)} 檔")
+    col2.metric("符合條件潛力股", f"{len(filtered_df)} 檔")
+    avg_discount = filtered_df["次產業_PE折溢價(%)"].mean() if len(filtered_df) > 0 else 0
+    col3.metric("平均 PE 折價率", f"{avg_discount:.1f}%")
 
+    if not st.session_state["filter_executed"]:
+        st.info("👈 **請確認或調整左側邊欄條件後，點擊『🔍 套用條件並開始篩選』按鈕即可產出潛力股清單！**")
+    else:
         st.subheader("🎯 Qualified Stock Targets (合格標的清單)")
         
         if len(filtered_df) > 0:
@@ -462,7 +478,7 @@ with tab1:
                 hide_index=True
             )
         else:
-            st.warning("尚無符合當前條件的標的，請適度放寬側邊欄的篩選條件並重新點擊篩選。")
+            st.warning("尚無符合當前條件的標的，請適度放寬側邊欄的篩選條件。")
 
 with tab2:
     st.subheader("🔍 雙源資料交叉檢視與對照表")
@@ -528,12 +544,15 @@ with tab3:
                         3. **綜合診斷評級**：給予明晰的估值診斷總結。
                         """
                         
-                        # 自動剝離 models/ 品牌前綴，徹底修復 404 報錯
-                        available_models = [m.name.replace("models/", "") for m in client.models.list()]
+                        # 自動相容處理 SDK 模型名稱 (移除多餘的 models/ 前綴並動態選擇可用模型)
+                        try:
+                            models_list = [m.name.replace("models/", "") for m in client.models.list()]
+                        except Exception:
+                            models_list = ["gemini-1.5-flash", "gemini-2.0-flash"]
                         
                         target_model = "gemini-1.5-flash"
-                        for m_name in available_models:
-                            if "gemini-1.5-flash" in m_name or "gemini-2.0-flash" in m_name or "gemini-2.5-flash" in m_name:
+                        for m_name in models_list:
+                            if "gemini-1.5-flash" in m_name or "gemini-2.0-flash" in m_name:
                                 target_model = m_name
                                 break
                         
