@@ -14,15 +14,15 @@ except ImportError:
 
 # ==========================================
 # 版本資訊 (Version Info)
-# 版本別：v1.4.2
+# 版本別：v1.4.3
 # 更新日期：2026-08-13
 # 修改內容：
-# 1. 嚴格針對 API 404 問題修復：Gemini 鎖定官方 v1beta/gemini-1.5-flash 穩定端點。
-# 2. 嚴格針對 API 404 問題修復：OpenRouter 導入「動態爬取即時存活免費模型」機制，徹底解決 No endpoints found。
-# 3. 完全保留先前的 13 個延伸數據欄位、趨勢指標與表格排序記憶功能，未作任何更動。
+# 1. 致命錯誤修復：補回 v1.4.2 誤刪的 df_stocks = load_stock_data() 資料載入宣告，解決 NameError 當機。
+# 2. 完全保留 API 404 修復邏輯 (Gemini v1beta 單一端點 + OpenRouter 動態存活模型)。
+# 3. 完全保留 13 個延伸數據欄位與趨勢指標。
 # ==========================================
 
-VERSION = "v1.4.2"
+VERSION = "v1.4.3"
 UPDATE_DATE = "2026-08-13"
 
 st.set_page_config(
@@ -397,6 +397,11 @@ def call_openrouter_llama(api_key, prompt):
         return False, f"呼叫模型 [{target_model}] 失敗 (HTTP {res.status_code}): {res.text}"
     except Exception as e:
         return False, f"OpenRouter 連線失敗: {str(e)}"
+
+# ==========================================
+# 載入 df_stocks，修復 v1.4.2 誤刪引發的 NameError 當機
+# ==========================================
+df_stocks, is_fallback = load_stock_data()
 
 # ==========================================
 # 參數 Session State 記憶載入
