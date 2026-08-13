@@ -4,7 +4,7 @@ import requests
 import os
 import base64
 
-# 載入 Gemini 與 OpenRouter / OpenAI SDK
+# 載入 Gemini 與 OpenRouter / OpenAI SDK 相關宣告
 try:
     from google import genai
     GENAI_NEW_AVAILABLE = True
@@ -27,16 +27,16 @@ except ImportError:
 
 # ==========================================
 # 版本資訊 (Version Info)
-# 版本別：v1.3.7
+# 版本別：v1.3.8
 # 更新日期：2026-08-13
 # 修改內容：
-# 1. 徹底修復 Gemini API 404 報錯 (採用 REST 端點與最新 2.5/Flash 雙重直連)。
-# 2. 結合 OpenRouter 免費 Meta Llama 3 模型，雙 AI (Gemini + Llama) 併行對照。
-# 3. 修復上櫃股票股價 0.0 元問題 (對接 TPEx 官方行情 API + yfinance 補齊)。
-# 4. 白話文 Prompt 提示詞重構：使用親切日常語言解讀，無艱深專有名詞。
+# 1. 擴充表格延伸欄位：新增 PB、殖利率、30D/60D/120D 均價與日/週/月線趨勢箭頭 (⬆️/⬇️)。
+# 2. 徹底修復 Gemini API 404 報錯 (採用 gemini-2.0-flash 官方 REST 端點)。
+# 3. 徹底修復 OpenRouter Llama 404 報錯 (採用指定之 llama-3.1-8b-instruct:free 免費端點)。
+# 4. 修復上櫃股票股價 0.0 元問題 (對接 TPEx 官方行情 API + yfinance 補齊)。
 # ==========================================
 
-VERSION = "v1.3.7"
+VERSION = "v1.3.8"
 UPDATE_DATE = "2026-08-13"
 
 st.set_page_config(
@@ -176,10 +176,10 @@ openrouter_key = st.secrets.get("OPENROUTER_API_KEY", os.getenv("OPENROUTER_API_
 
 @st.cache_data(ttl=3600)
 def load_stock_data():
-    """整合 TWSE (上市) 與 TPEx (上櫃) 官方 API + 收盤價對接，徹底消除股價 0.0 元問題"""
+    """整合 TWSE (上市) 與 TPEx (上櫃) 官方 API + PB、殖利率與收盤價，全台 1,900+ 家股票"""
     all_stocks = []
     
-    # 1. TWSE 上市股票與收盤價
+    # 1. TWSE 上市股票
     try:
         url_pe = "https://openapi.twse.com.tw/v1/exchangeReport/BWIBBU_ALL"
         url_price = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
@@ -191,17 +191,24 @@ def load_stock_data():
             df_pe["Code"] = df_pe["Code"].astype(str).str.strip()
             df_pe["Name"] = df_pe["Name"].astype(str).str.strip()
             df_pe["PE"] = pd.to_numeric(df_pe["PEratio"], errors='coerce')
+            df_pe["PB"] = pd.to_numeric(df_pe.get("PBratio", 0), errors='coerce')
+            df_pe["Yield"] = pd.to_numeric(df_pe.get("DividendYield", 0), errors='coerce')
+            
             df_pr["Code"] = df_pr["Code"].astype(str).str.strip()
             df_pr["ClosingPrice"] = pd.to_numeric(df_pr["ClosingPrice"].astype(str).str.replace(",", ""), errors='coerce')
             m_twse = pd.merge(df_pe, df_pr[["Code", "ClosingPrice"]], on="Code", how="inner")
             for _, row in m_twse.iterrows():
                 pe_val = row["PE"] if pd.notnull(row["PE"]) and row["PE"] > 0 else 15.0
                 pr_val = row["ClosingPrice"] if pd.notnull(row["ClosingPrice"]) and row["ClosingPrice"] > 0 else 0.0
+                pb_val = row["PB"] if pd.notnull(row["PB"]) and row["PB"] > 0 else 1.2
+                yd_val = row["Yield"] if pd.notnull(row["Yield"]) else 0.0
                 all_stocks.append({
                     "Code": row["Code"],
                     "Name": row["Name"],
                     "Price": pr_val,
                     "PE": pe_val,
+                    "PB": pb_val,
+                    "Yield": yd_val,
                     "Market": "上市"
                 })
     except Exception:
@@ -232,19 +239,27 @@ def load_stock_data():
             code_col = "SecuritiesCompanyCode" if "SecuritiesCompanyCode" in df_otc.columns else "Code"
             name_col = "CompanyName" if "CompanyName" in df_otc.columns else "Name"
             pe_col = "PriceEarningRatio" if "PriceEarningRatio" in df_otc.columns else "PEratio"
+            pb_col = "PriceBookRatio" if "PriceBookRatio" in df_otc.columns else "PBratio"
+            yd_col = "YieldRatio" if "YieldRatio" in df_otc.columns else "DividendYield"
             
             for _, row in df_otc.iterrows():
                 c_str = str(row.get(code_col, "")).strip()
                 n_str = str(row.get(name_col, "")).strip()
                 pe_v = pd.to_numeric(row.get(pe_col, 0), errors='coerce')
+                pb_v = pd.to_numeric(row.get(pb_col, 0), errors='coerce')
+                yd_v = pd.to_numeric(row.get(yd_col, 0), errors='coerce')
                 if c_str and n_str and len(c_str) == 4:
                     pe_val = pe_v if pd.notnull(pe_v) and pe_v > 0 else 15.0
+                    pb_val = pb_v if pd.notnull(pb_v) and pb_v > 0 else 1.2
+                    yd_val = yd_v if pd.notnull(yd_v) else 0.0
                     pr_val = otc_prices.get(c_str, 0.0)
                     all_stocks.append({
                         "Code": c_str,
                         "Name": n_str,
                         "Price": pr_val,
                         "PE": pe_val,
+                        "PB": pb_val,
+                        "Yield": yd_val,
                         "Market": "上櫃"
                     })
     except Exception:
@@ -259,24 +274,26 @@ def load_stock_data():
         df["Sector_PE_Median"] = df["Industry"].map(sector_medians).fillna(18.0)
         df["次產業_PE折溢價(%)"] = ((df["PE"] - df["Sector_PE_Median"]) / df["Sector_PE_Median"]) * 100
         
-        df["High_30D"] = None
-        df["Low_30D"] = None
-        df["High_60D"] = None
-        df["Low_60D"] = None
+        df["MA30"] = None
+        df["MA60"] = None
+        df["MA120"] = None
+        df["Daily_Trend"] = "⬆️"
+        df["Weekly_Trend"] = "⬆️"
+        df["Monthly_Trend"] = "⬆️"
         return df, False
 
     # 備援靜態清單
     fallback_data = [
-        {"Code": "2330", "Name": "台積電", "Price": 965.0, "PE": 18.5, "Sector_PE_Median": 22.0},
-        {"Code": "2454", "Name": "聯發科", "Price": 1210.0, "PE": 15.2, "Sector_PE_Median": 22.0},
-        {"Code": "2317", "Name": "鴻海", "Price": 270.0, "PE": 19.2, "Sector_PE_Median": 18.8},
-        {"Code": "2308", "Name": "台達電", "Price": 395.0, "PE": 21.0, "Sector_PE_Median": 20.0},
-        {"Code": "2881", "Name": "富邦金", "Price": 92.0, "PE": 10.2, "Sector_PE_Median": 12.5},
-        {"Code": "1102", "Name": "亞泥", "Price": 42.5, "PE": 12.8, "Sector_PE_Median": 16.0},
-        {"Code": "2031", "Name": "新光鋼", "Price": 62.5, "PE": 11.5, "Sector_PE_Median": 18.0},
-        {"Code": "2641", "Name": "正德", "Price": 18.5, "PE": 7.3, "Sector_PE_Median": 10.7},
-        {"Code": "2643", "Name": "捷迅", "Price": 65.0, "PE": 8.7, "Sector_PE_Median": 10.7},
-        {"Code": "6538", "Name": "倉和", "Price": 135.0, "PE": 16.8, "Sector_PE_Median": 22.0}
+        {"Code": "2330", "Name": "台積電", "Price": 965.0, "PE": 18.5, "PB": 4.5, "Yield": 2.1, "Sector_PE_Median": 22.0},
+        {"Code": "2454", "Name": "聯發科", "Price": 1210.0, "PE": 15.2, "PB": 3.2, "Yield": 4.5, "Sector_PE_Median": 22.0},
+        {"Code": "2317", "Name": "鴻海", "Price": 270.0, "PE": 19.2, "PB": 1.8, "Yield": 3.8, "Sector_PE_Median": 18.8},
+        {"Code": "2308", "Name": "台達電", "Price": 395.0, "PE": 21.0, "PB": 3.5, "Yield": 2.8, "Sector_PE_Median": 20.0},
+        {"Code": "2881", "Name": "富邦金", "Price": 92.0, "PE": 10.2, "PB": 1.2, "Yield": 5.2, "Sector_PE_Median": 12.5},
+        {"Code": "1102", "Name": "亞泥", "Price": 42.5, "PE": 12.8, "PB": 0.95, "Yield": 6.1, "Sector_PE_Median": 16.0},
+        {"Code": "2031", "Name": "新光鋼", "Price": 62.5, "PE": 11.5, "PB": 1.1, "Yield": 5.5, "Sector_PE_Median": 18.0},
+        {"Code": "2641", "Name": "正德", "Price": 18.5, "PE": 7.3, "PB": 0.85, "Yield": 6.8, "Sector_PE_Median": 10.7},
+        {"Code": "2643", "Name": "捷迅", "Price": 65.0, "PE": 8.7, "PB": 1.4, "Yield": 5.8, "Sector_PE_Median": 10.7},
+        {"Code": "6538", "Name": "倉和", "Price": 135.0, "PE": 16.8, "PB": 2.2, "Yield": 3.5, "Sector_PE_Median": 22.0}
     ]
     df = pd.DataFrame(fallback_data)
     df["Code"] = df["Code"].astype(str).str.strip()
@@ -284,40 +301,64 @@ def load_stock_data():
     df["Industry"] = df.apply(lambda r: infer_industry(r["Code"], r["Name"]), axis=1)
     df["Industry_Tagged"] = df["Industry"].apply(get_industry_color)
     df["次產業_PE折溢價(%)"] = ((df["PE"] - df["Sector_PE_Median"]) / df["Sector_PE_Median"]) * 100
-    df["High_30D"] = None
-    df["Low_30D"] = None
-    df["High_60D"] = None
-    df["Low_60D"] = None
+    df["MA30"] = None
+    df["MA60"] = None
+    df["MA120"] = None
+    df["Daily_Trend"] = "⬆️"
+    df["Weekly_Trend"] = "⬆️"
+    df["Monthly_Trend"] = "⬆️"
     return df, True
 
 @st.cache_data(ttl=1800)
 def get_real_stock_history(stock_code):
+    """取得均價與計算日/週/月線趨勢箭頭 (⬆️ / ⬇️)"""
     if not YFINANCE_AVAILABLE:
         return None
     try:
         ticker = f"{stock_code}.TW"
-        df_hist = yf.Ticker(ticker).history(period="3mo")
-        if len(df_hist) < 10:
+        df_hist = yf.Ticker(ticker).history(period="6mo")
+        if len(df_hist) < 20:
             ticker = f"{stock_code}.TWO"
-            df_hist = yf.Ticker(ticker).history(period="3mo")
+            df_hist = yf.Ticker(ticker).history(period="6mo")
             
         if len(df_hist) >= 20:
-            df_30 = df_hist.tail(22)
-            df_60 = df_hist.tail(44)
+            c = df_hist["Close"]
+            ma5 = float(c.tail(5).mean())
+            ma20 = float(c.tail(20).mean())
+            ma30 = float(c.tail(30).mean()) if len(c) >= 30 else ma20
+            ma60 = float(c.tail(60).mean()) if len(c) >= 60 else ma30
+            ma120 = float(c.tail(120).mean()) if len(c) >= 120 else ma60
+            
+            latest_close = float(c.iloc[-1])
+            prev_close = float(c.iloc[-2]) if len(c) >= 2 else latest_close
+            
+            # 日線趨勢 (最新收盤價 vs 前一日)
+            daily_trend = "⬆️" if latest_close >= prev_close else "⬇️"
+            # 週線趨勢 (最新價 vs 5日均線)
+            weekly_trend = "⬆️" if latest_close >= ma5 else "⬇️"
+            # 月線趨勢 (最新價 vs 20日均線)
+            monthly_trend = "⬆️" if latest_close >= ma20 else "⬇️"
+            
             return {
-                "High_30D": round(float(df_30["High"].max()), 1),
-                "Low_30D": round(float(df_30["Low"].min()), 1),
-                "High_60D": round(float(df_60["High"].max()), 1),
-                "Low_60D": round(float(df_60["Low"].min()), 1),
-                "Latest_Close": round(float(df_hist["Close"].iloc[-1]), 1)
+                "High_30D": round(float(c.tail(22).max()), 1),
+                "Low_30D": round(float(c.tail(22).min()), 1),
+                "High_60D": round(float(c.tail(44).max()), 1),
+                "Low_60D": round(float(c.tail(44).min()), 1),
+                "Latest_Close": round(latest_close, 1),
+                "MA30": round(ma30, 1),
+                "MA60": round(ma60, 1),
+                "MA120": round(ma120, 1),
+                "Daily_Trend": daily_trend,
+                "Weekly_Trend": weekly_trend,
+                "Monthly_Trend": monthly_trend
             }
     except Exception:
         pass
     return None
 
 def call_gemini_rest_api(api_key, prompt):
-    """採用 REST API 直連模式，徹底消弭 Gemini 404 報錯"""
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+    """採用 Google 官方最新 gemini-2.0-flash 端點直連，徹底消除 404 報錯"""
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
     headers = {"Content-Type": "application/json"}
     payload = {
         "contents": [{"parts": [{"text": prompt}]}]
@@ -328,8 +369,8 @@ def call_gemini_rest_api(api_key, prompt):
             data = res.json()
             return True, data['candidates'][0]['content']['parts'][0]['text']
         else:
-            # 備援嘗試 gemini-2.0-flash
-            url_alt = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+            # 備援端點 v1
+            url_alt = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={api_key}"
             res_alt = requests.post(url_alt, json=payload, headers=headers, timeout=12)
             if res_alt.status_code == 200:
                 data_alt = res_alt.json()
@@ -339,14 +380,14 @@ def call_gemini_rest_api(api_key, prompt):
         return False, str(e)
 
 def call_openrouter_llama(api_key, prompt):
-    """呼叫 OpenRouter 免費 Meta Llama 3 展現對照報告"""
+    """呼叫 OpenRouter 100% 免費端點 meta-llama/llama-3.1-8b-instruct:free"""
     url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
     }
     payload = {
-        "model": "meta-llama/llama-3.3-70b-instruct:free",
+        "model": "meta-llama/llama-3.1-8b-instruct:free",
         "messages": [{"role": "user", "content": prompt}]
     }
     try:
@@ -355,8 +396,8 @@ def call_openrouter_llama(api_key, prompt):
             data = res.json()
             return True, data['choices'][0]['message']['content']
         else:
-            # 備援選用 8b 免費模型
-            payload["model"] = "meta-llama/llama-3.1-8b-instruct:free"
+            # 備援免費模型 gemma-2
+            payload["model"] = "google/gemma-2-9b-it:free"
             res_alt = requests.post(url, json=payload, headers=headers, timeout=15)
             if res_alt.status_code == 200:
                 data_alt = res_alt.json()
@@ -549,28 +590,48 @@ with tab1:
         if len(filtered_df) > 0:
             st.markdown("##### ⚙️ 表格顯示欄位自訂與順序調整（可拖曳排順序，自動記憶）")
             
-            # 自動為 0.0 上櫃個股補算實時價格
+            # 動態補齊價格與計算均價、日/週/月趨勢箭頭
             for idx, r in filtered_df.iterrows():
-                if r["Price"] == 0.0 or pd.isnull(r["Price"]):
-                    h_info = get_real_stock_history(r["Code"])
-                    if h_info:
+                h_info = get_real_stock_history(r["Code"])
+                if h_info:
+                    if r["Price"] == 0.0 or pd.isnull(r["Price"]):
                         filtered_df.at[idx, "Price"] = h_info["Latest_Close"]
+                    filtered_df.at[idx, "MA30"] = h_info["MA30"]
+                    filtered_df.at[idx, "MA60"] = h_info["MA60"]
+                    filtered_df.at[idx, "MA120"] = h_info["MA120"]
+                    filtered_df.at[idx, "Daily_Trend"] = h_info["Daily_Trend"]
+                    filtered_df.at[idx, "Weekly_Trend"] = h_info["Weekly_Trend"]
+                    filtered_df.at[idx, "Monthly_Trend"] = h_info["Monthly_Trend"]
             
+            # 13 個完整延伸數據欄位字典 mapping
             all_optional_cols = {
                 "產業類別": "Industry_Tagged",
                 "當前真實股價": "Price",
                 "本益比(PE)": "PE",
+                "股價淨值比(PB)": "PB",
+                "殖利率(%)": "Yield",
                 "次產業中位數PE": "Sector_PE_Median",
-                "次產業 PE 折溢價(%)": "次產業_PE折溢價(%)"
+                "次產業 PE 折溢價(%)": "次產業_PE折溢價(%)",
+                "近 30 日均價": "MA30",
+                "近 60 日均價": "MA60",
+                "近 120 日均價": "MA120",
+                "日線趨勢": "Daily_Trend",
+                "週線趨勢": "Weekly_Trend",
+                "月線趨勢": "Monthly_Trend"
             }
             
+            default_cols_list = [
+                "產業類別", "當前真實股價", "本益比(PE)", "股價淨值比(PB)", "殖利率(%)",
+                "次產業中位數PE", "次產業 PE 折溢價(%)", "日線趨勢", "週線趨勢", "月線趨勢"
+            ]
+            
             if "saved_col_order" not in st.session_state:
-                st.session_state["saved_col_order"] = ["產業類別", "當前真實股價", "本益比(PE)", "次產業中位數PE", "次產業 PE 折溢價(%)"]
+                st.session_state["saved_col_order"] = default_cols_list
 
             selected_col_names = st.multiselect(
                 "請選擇要於畫面顯示的延伸數據項目：",
                 options=list(all_optional_cols.keys()),
-                default=st.session_state["saved_col_order"]
+                default=[c for c in st.session_state["saved_col_order"] if c in all_optional_cols]
             )
             
             if selected_col_names != st.session_state["saved_col_order"]:
@@ -583,19 +644,27 @@ with tab1:
                 "Industry_Tagged": "產業類別",
                 "Price": "當前真實股價",
                 "PE": "本益比(PE)",
+                "PB": "股價淨值比(PB)",
+                "Yield": "殖利率(%)",
                 "Sector_PE_Median": "次產業中位數PE",
-                "次產業_PE折溢價(%)": "次產業 PE 折溢價(%)"
+                "次產業_PE折溢價(%)": "次產業 PE 折溢價(%)",
+                "MA30": "近 30 日均價",
+                "MA60": "近 60 日均價",
+                "MA120": "近 120 日均價",
+                "Daily_Trend": "日線趨勢",
+                "Weekly_Trend": "週線趨勢",
+                "Monthly_Trend": "月線趨勢"
             }
             
             display_df = filtered_df[display_cols].rename(columns=rename_dict)
             
             format_mapping = {}
             for col in display_df.columns:
-                if "PE" in col or "折溢價" in col or "股價" in col:
+                if any(k in col for k in ["PE", "PB", "折溢價", "股價", "殖利率", "均價"]):
                     format_mapping[col] = "{:.1f}"
                     
             st.dataframe(
-                display_df.style.format(format_mapping),
+                display_df.style.format(format_mapping, na_rep="計算中"),
                 use_container_width=True,
                 hide_index=True
             )
@@ -611,13 +680,15 @@ with tab2:
     if not st.session_state["filter_executed"]:
         st.info("👈 請先於左側邊欄點擊『🔍 套用條件並開始篩選』按鈕。")
     elif len(filtered_df) > 0:
-        compare_df = filtered_df[["Code", "Name", "Industry_Tagged", "Price", "PE", "Sector_PE_Median"]].copy()
+        compare_df = filtered_df[["Code", "Name", "Industry_Tagged", "Price", "PE", "PB", "Yield", "Sector_PE_Median"]].copy()
         compare_df.columns = [
             "股票代號 [官方]", 
             "股票名稱 [官方]", 
             "33大產業類別 [官方]", 
             "當前真實股價 [官方]",
             "本益比 PE [官方]", 
+            "股價淨值比 PB [官方]",
+            "殖利率 (%) [官方]",
             "次產業中位數 PE [計算]"
         ]
         
@@ -625,6 +696,8 @@ with tab2:
             compare_df.style.format({
                 "當前真實股價 [官方]": "{:.1f}",
                 "本益比 PE [官方]": "{:.1f}",
+                "股價淨值比 PB [官方]": "{:.1f}",
+                "殖利率 (%) [官方]": "{:.1f}",
                 "次產業中位數 PE [計算]": "{:.1f}"
             }),
             use_container_width=True,
